@@ -58,17 +58,22 @@ Mạng trong cụm: pod 10.244.0.0/16 (Calico), service 10.96.0.0/12 (mặc đ�
 | k8s-w2 | 6 | 8 GB | 100 GB | Worker |
 | **Tổng VM** | **17** | **26 GB** | | |
 
-**Ước lượng RAM trên 3 node (24 GB):**
+**Ước lượng RAM trên 3 node (24 GiB), Giai đoạn 0–1:** chốt ở [ticket 04 của docs](../../docs/.scratch/architecture-g0-g1/issues/04-resource-budget.md#answer) và [ADR-0004](../../docs/adr/0004-single-instance-by-default-on-homelab.md). Mặc định mỗi service và database **1 instance**; thí nghiệm cần thì mới scale lên.
 
 | Thành phần | RAM |
 |---|---|
-| Hệ điều hành, kubelet, containerd, Calico, kube-proxy (×3 node) | ~3 GB |
-| etcd, kube-apiserver, scheduler, controller-manager, CoreDNS | ~1,5 GB |
-| Kafka 3 broker (KRaft) | ~4,5 GB |
-| PostgreSQL primary + replica | ~2 GB |
-| Redis | ~0,5 GB |
-| OpenSearch 1 node | ~3 GB |
-| **Còn lại cho service commerce-hub** | **~8–9 GB** (khoảng 15 pod Spring Boot) |
+| Hệ điều hành, kubelet, containerd (×3 node) | ~2,4 GB |
+| Control plane, CoreDNS, kube-proxy, Calico, MetalLB, metrics-server, local-path | ~3,1 GB |
+| Argo CD, Sealed Secrets, cert-manager, Strimzi Drain Cleaner | ~1,3 GB |
+| Kafka 3 broker (1 Gi mỗi broker) + Strimzi operator, Entity Operator | ~3,9 GB |
+| Apicurio Registry | ~0,9 GB |
+| PostgreSQL `pg-main` 1 instance + Pooler + Barman + CNPG | ~1,5 GB |
+| Keycloak 1 instance + operator | ~2 GB |
+| LGTM (Prometheus, Loki, Tempo, Grafana, Collector…) | ~3,4 GB |
+| Service G1 (6 service, shopee-sim, frontend, 1 replica; surge, Job Flyway) | ~4,6 GB |
+| **Còn dư** | **~1 GB** |
+
+Redis (Giai đoạn 3) và OpenSearch (Giai đoạn 6) chưa có trong bảng: tới giai đoạn đó phải tính lại.
 
 Đây là ước lượng cho lab, không phải số đo. OpenSearch nên chỉ bật khi cần. Đổi RAM của VM rất dễ: `Stop-VM`, `Set-VMMemory -VMName <vm> -StartupBytes 10GB`, `Start-VM`.
 
@@ -1047,8 +1052,8 @@ Dựng ở giai đoạn 0 của commerce-hub (xem `requirements-and-techniques.m
 
 | Thành phần | Cách cài | Ghi chú |
 |---|---|---|
-| Kafka | **Strimzi** operator (bản 1.3.x trong quickstart, Kafka 4.3.x). Cài operator: `kubectl create namespace kafka`, `kubectl create -f 'https://strimzi.io/install/latest?namespace=kafka' -n kafka` | Viết CR `Kafka` + `KafkaNodePool` 3 node, KRaft (không ZooKeeper), `default.replication.factor: 3`, `min.insync.replicas: 2`, heap khoảng 1 GB mỗi broker |
-| PostgreSQL | **CloudNativePG** (v1.30.1). Cài bằng manifest `cnpg-1.30.1.yaml` trong trang releases của dự án; lệnh cài chính xác xem trang Installation của CloudNativePG (chưa xác minh) | CR `Cluster` `pg-main` với `instances: 2` (primary + replica), tự failover; thử tắt node đang chạy primary. Backup cần thêm **cert-manager** và plugin **Barman Cloud** v0.16.0, đích là RustFS trên `gw` (MinIO community đã archived) |
+| Kafka | **Strimzi** operator (bản 1.3.x trong quickstart, Kafka 4.3.x). Cài operator: `kubectl create namespace kafka`, `kubectl create -f 'https://strimzi.io/install/latest?namespace=kafka' -n kafka` | Viết CR `Kafka` + `KafkaNodePool` 3 node, KRaft (không ZooKeeper), `default.replication.factor: 3`, `min.insync.replicas: 2`, memory 1 Gi, heap 512m mỗi broker (ticket 04 của docs) |
+| PostgreSQL | **CloudNativePG** (v1.30.1). Cài bằng manifest `cnpg-1.30.1.yaml` trong trang releases của dự án; lệnh cài chính xác xem trang Installation của CloudNativePG (chưa xác minh) | CR `Cluster` `pg-main`, mặc định `instances: 1` (ADR-0004 của docs). Khi làm thí nghiệm failover thì tăng lên 2 (primary + replica) rồi tắt node đang chạy primary. Backup cần thêm **cert-manager** và plugin **Barman Cloud** v0.16.0, đích là RustFS trên `gw` (MinIO community đã archived) |
 | Redis | Helm chart hoặc manifest StatefulSet tự viết, 1 instance | Lab dùng làm cache, mất cũng không sao |
 | OpenSearch | OpenSearch Helm chart hoặc OpenSearch operator, **1 node** | Tốn RAM nhất; heap khoảng 1–1,5 GB, đặt `limits` khoảng 3 GB; chỉ bật khi làm phần tìm kiếm |
 
