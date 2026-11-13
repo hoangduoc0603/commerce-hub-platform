@@ -72,11 +72,14 @@ else
   check "ruleset: chỉ chặn xóa và force push" "$(jq -c '[.rules[].type] | sort' <<<"$RS")" '["deletion","non_fast_forward"]'
 fi
 # Không ruleset nào (kể cả do người khác tạo) được bắt PR hay status check (ADR-0006).
-FORBIDDEN="$(
-  for id in $(gh api "repos/$REPO/rulesets" --jq '.[].id'); do
-    gh api "repos/$REPO/rulesets/$id" --jq ".rules[].type | select(IN(${FORBIDDEN_RULE_TYPES}[]))"
-  done | sort -u | paste -sd, -
-)"
+# Lỗi API ở đây phải dừng có thông báo, không được thoát im lặng giữa chừng vì set -e.
+RS_IDS="$(gh api "repos/$REPO/rulesets" --jq '.[].id')" || die "không đọc được rulesets của $REPO"
+FORBIDDEN=""
+for id in $RS_IDS; do
+  TYPES="$(gh api "repos/$REPO/rulesets/$id" --jq ".rules[].type | select(IN(${FORBIDDEN_RULE_TYPES}[]))")" \
+    || die "không đọc được ruleset $id"
+  FORBIDDEN="$(printf '%s\n%s' "$FORBIDDEN" "$TYPES" | sed '/^$/d' | sort -u | paste -sd, -)"
+done
 check "không ruleset nào bắt PR/status check" "${FORBIDDEN:-none}" "none"
 DEFAULT_BRANCH="$(jq -r .default_branch <<<"$META")"
 check "không dùng branch protection rule cũ" \
@@ -104,7 +107,7 @@ if [[ -n "$LOCAL" ]]; then
   WANT_ECOS="$(ecosystems_json "$ECOS")"
   DB="$LOCAL/.github/dependabot.yml"
   if [[ -f "$DB" ]]; then
-    HAVE_ECOS="$(grep -E '^\s*-\s*package-ecosystem:' "$DB" | awk '{print $NF}' | jq -R . | jq -sc 'unique')"
+    HAVE_ECOS="$(ecosystems_in_file "$DB" | tr ',' '\n' | jq -R . | jq -sc 'unique')"
     MISSING="$(jq -rn --argjson w "$WANT_ECOS" --argjson h "$HAVE_ECOS" '$w - $h | join(",")')"
     check "dependabot.yml có đủ ecosystem $(jq -r 'join(",")' <<<"$WANT_ECOS")" "${MISSING:+thiếu $MISSING}" ""
   else
@@ -115,7 +118,10 @@ if [[ -n "$LOCAL" ]]; then
   # nên lớp chặn thật là quét toàn bộ history ở đây.
   if git -C "$LOCAL" rev-parse -q --verify HEAD >/dev/null; then
     # Chỉ đếm, không in email ra: output audit có thể được dán vào issue/log công khai.
-    LEAKS="$(git -C "$LOCAL" log --all --format='%ae%n%ce' | sort -u | { grep -Ev "$NOREPLY_RE" || true; } | wc -l | tr -d ' ')"
+    # Gồm cả tagger của annotated tag: tag release cũng được push và mang email.
+    LEAKS="$( { git -C "$LOCAL" log --all --format='%ae%n%ce'
+                git -C "$LOCAL" for-each-ref refs/tags --format='%(taggeremail:trim)' | sed 's/^<//; s/>$//' | sed '/^$/d'; } \
+      | sort -u | { grep -Ev "$NOREPLY_RE" || true; } | wc -l | tr -d ' ')"
     check "history chỉ có email noreply (số email khác)" "$LEAKS" "0"
   else
     pass "history chỉ có email noreply (chưa có commit)"

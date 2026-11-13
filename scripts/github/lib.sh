@@ -70,9 +70,17 @@ api_jq() { # api_jq <path> <jq filter> <mặc định>
   if [[ -n "$out" ]]; then jq -r "$2" <<<"$out"; else printf '%s' "$3"; fi
 }
 
-# id ruleset theo tên, rỗng nếu chưa có.
+# id ruleset theo tên, rỗng nếu chưa có. Lỗi API thì dừng hẳn (không coi là "chưa có",
+# vì như vậy bootstrap sẽ POST thêm một ruleset trùng tên).
 ruleset_id() { # ruleset_id <owner/name>
-  jq -r --arg n "$RULESET_NAME" 'first(.[] | select(.name == $n) | .id) // empty' <<<"$(api_get "repos/$1/rulesets" '[]')"
+  local list
+  list="$(gh api "repos/$1/rulesets")" || die "không đọc được rulesets của $1"
+  jq -r --arg n "$RULESET_NAME" 'first(.[] | select(.name == $n) | .id) // empty' <<<"$list"
+}
+
+# Ecosystem đang có trong một dependabot.yml, dạng "a,b".
+ecosystems_in_file() { # ecosystems_in_file <file>
+  grep -E '^[[:space:]]*-[[:space:]]*package-ecosystem:' "$1" | awk '{print $NF}' | paste -sd, -
 }
 
 # HTTP status của một GET (không in body). Dùng cho endpoint trả 204/404 như vulnerability-alerts.
@@ -84,7 +92,7 @@ http_status() {
 ecosystems_json() {
   local csv="${1:-}"
   printf '%s' "github-actions,${csv}" \
-    | tr ',' '\n' | sed '/^$/d' | sort -u \
+    | tr -d '[:space:]' | tr ',' '\n' | sed '/^$/d' | sort -u \
     | jq -R . | jq -sc .
 }
 

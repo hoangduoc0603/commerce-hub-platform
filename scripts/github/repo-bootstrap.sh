@@ -88,8 +88,9 @@ if [[ "$(jq -r '.sha_pinning_required // false' <<<"$AP")" == "true" ]]; then
   ok "Actions bắt ghim SHA đầy đủ"
 else
   # PUT thay cả object: giữ nguyên enabled/allowed_actions hiện tại, chỉ đổi sha_pinning_required.
+  # Actions tắt thì GET không có allowed_actions; gửi null sẽ bị 422, nên chỉ gửi khi có.
   change "bật bắt ghim SHA đầy đủ" gh api -X PUT "repos/$REPO/actions/permissions" \
-    --input - <<<"$(jq -c '{enabled, allowed_actions, sha_pinning_required: true}' <<<"$AP")"
+    --input - <<<"$(jq -c '{enabled} + (if .allowed_actions then {allowed_actions} else {} end) + {sha_pinning_required: true}' <<<"$AP")"
 fi
 
 WP="$(api_get "repos/$REPO/actions/permissions/workflow" '{}')"
@@ -109,7 +110,8 @@ DESIRED_RS="$(jq -nc --arg name "$RULESET_NAME" --argjson rules "$RULESET_RULES"
 }')"
 normalize_rs() { jq -cS '{name, target, enforcement, conditions, rules: ([.rules[] | {type}] | sort_by(.type)), bypass_actors: (.bypass_actors // [])}'; }
 
-RS_ID="$(ruleset_id "$REPO")"
+RS_ID=""
+[[ -z "${META:-}" ]] || RS_ID="$(ruleset_id "$REPO")"   # repo chưa có (dry-run) thì chắc chắn chưa có ruleset
 if [[ -z "$RS_ID" ]]; then
   change "tạo ruleset $RULESET_NAME (chặn xóa, chặn force push)" gh api -X POST "repos/$REPO/rulesets" --input - <<<"$DESIRED_RS"
 elif [[ "$(gh api "repos/$REPO/rulesets/$RS_ID" | normalize_rs)" == "$(normalize_rs <<<"$DESIRED_RS")" ]]; then
@@ -137,7 +139,9 @@ write_if_differs() { # write_if_differs <file> <mô tả>  (nội dung mới đ�
 if [[ -n "$LOCAL" ]]; then
   printf 'Bản clone %s\n' "$LOCAL"
 
-  if git -C "$LOCAL" remote get-url origin >/dev/null 2>&1; then
+  if ORIGIN="$(git -C "$LOCAL" remote get-url origin 2>/dev/null)"; then
+    # origin trỏ repo khác (clone copy từ template...) thì lần push sau sẽ đẩy nhầm repo.
+    [[ "$ORIGIN" =~ github\.com[:/]${REPO}(\.git)?$ ]] || die "origin của $LOCAL là '$ORIGIN', không phải $REPO."
     ok "remote origin"
   else
     change "gắn remote origin" git -C "$LOCAL" remote add origin "https://github.com/$REPO.git"
@@ -165,11 +169,14 @@ if [[ -n "$LOCAL" ]]; then
 
   # dependabot.yml: script sở hữu cả file. Có file khác mẫu thì không ghi đè, báo để người quyết.
   DB="$LOCAL/.github/dependabot.yml"
-  WANT_DB="$(render_dependabot "$(ecosystems_json "$ECOS")")"
+  # Không truyền --ecosystems thì giữ ecosystem đang có, để chạy lại không âm thầm bỏ gradle/docker.
+  if [[ -z "$ECOS" && -f "$DB" ]]; then ECOS="$(ecosystems_in_file "$DB")"; fi
+  WANT_ECOS="$(ecosystems_json "$ECOS")"
+  WANT_DB="$(render_dependabot "$WANT_ECOS")"
   if [[ -f "$DB" && "$(cat "$DB")" != "$WANT_DB" ]] && ! head -n1 "$DB" | grep -q 'repo-bootstrap.sh'; then
     die "$DB do người viết, khác mẫu. Xóa đi để script sinh lại, hoặc sửa tay cho đủ ecosystem."
   fi
-  write_if_differs "$DB" "dependabot.yml ($(ecosystems_json "$ECOS" | jq -r 'join(",")'))" <<<"$WANT_DB"
+  write_if_differs "$DB" "dependabot.yml ($(jq -r 'join(",")' <<<"$WANT_ECOS"))" <<<"$WANT_DB"
 fi
 
 printf '\n%d thay đổi%s\n' "$CHANGES" "$($DRY_RUN && echo ' (dry-run, chưa ghi gì)')"
