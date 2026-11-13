@@ -6,7 +6,7 @@ Hướng dẫn biến máy bàn Windows thành "hạ tầng server" gồm nhiề
 
 **Thời gian dựng lần đầu:** khoảng một ngày (mục 7 dựng cụm bằng kubeadm chiếm khoảng nửa ngày).
 
-> **Độ tin cậy.** Các lệnh và thông số được tra từ tài liệu chính thức của Microsoft, Debian, systemd, Tailscale, Kubernetes, containerd, Docker, Calico, MetalLB, local-path-provisioner và metrics-server vào tháng 11/2026 (danh sách ở cuối). Chỗ nào tài liệu không xác nhận trực tiếp thì ghi **(chưa xác minh)** và kèm cách kiểm tra hoặc phương án thay thế.
+> **Độ tin cậy.** Các lệnh và thông số được tra từ tài liệu chính thức của Microsoft, Debian, systemd, Tailscale, Kubernetes, containerd, Docker, Calico, MetalLB, local-path-provisioner và metrics-server vào tháng 11/2026 (danh sách ở cuối). Mục 8.6–8.9 (cửa vào cụm, DNS, CA, Mailpit) tóm từ chuẩn [cluster-entry.md](../../docs/standards/cluster-entry.md), nguồn chi tiết ở đó. Chỗ nào tài liệu không xác nhận trực tiếp thì ghi **(chưa xác minh)** và kèm cách kiểm tra hoặc phương án thay thế.
 
 ---
 
@@ -23,6 +23,7 @@ Máy bàn: Windows 10 Pro + Hyper-V
   ├─ vSwitch "LabNAT" (Internal + WinNAT)  ── mạng riêng 10.20.0.0/24, gateway 10.20.0.1 = Windows
   │     │
   │     ├─ gw       10.20.0.5   Tailscale subnet router + registry image (cổng 5000)
+  │     │                       + dnsmasq cho lab.internal (cổng 53) + Mailpit (SMTP 1025, UI 8025)
   │     ├─ k8s-cp   10.20.0.10  control plane (etcd, apiserver, scheduler, controller-manager) + nhận pod
   │     ├─ k8s-w1   10.20.0.11  worker
   │     └─ k8s-w2   10.20.0.12  worker
@@ -30,6 +31,7 @@ Máy bàn: Windows 10 Pro + Hyper-V
   │           └─ trên cả 3 node: service commerce-hub + Kafka (3 broker), PostgreSQL, Redis, OpenSearch
   │
   └─ 10.20.0.200–250: dải IP LoadBalancer do MetalLB cấp
+        10.20.0.200 cố định cho Gateway edge (Envoy Gateway): mọi *.lab.internal đi vào đây
 
 Mạng trong cụm: pod 10.244.0.0/16 (Calico), service 10.96.0.0/12 (mặc định của kubeadm)
 ```
@@ -52,7 +54,7 @@ Mạng trong cụm: pod 10.244.0.0/16 (Calico), service 10.96.0.0/12 (mặc đ�
 | VM | vCPU | RAM | Ổ ảo (dynamic, tối đa) | Vai trò |
 |---|---|---|---|---|
 | Windows (host) | — | ~6 GB | — | Hệ điều hành, ứng dụng hằng ngày |
-| gw | 1 | 2 GB | 100 GB | Tailscale subnet router, registry image |
+| gw | 1 | 2 GB | 100 GB | Tailscale subnet router, registry image, dnsmasq (`lab.internal`), Mailpit |
 | k8s-cp | 4 | 8 GB | 100 GB | Control plane + workload |
 | k8s-w1 | 6 | 8 GB | 100 GB | Worker |
 | k8s-w2 | 6 | 8 GB | 100 GB | Worker |
@@ -71,9 +73,10 @@ Mạng trong cụm: pod 10.244.0.0/16 (Calico), service 10.96.0.0/12 (mặc đ�
 | Keycloak 1 instance + operator | ~2 GB |
 | LGTM (Prometheus, Loki, Tempo, Grafana, Collector…) | ~3,4 GB |
 | Service G1 (6 service, shopee-sim, frontend, 1 replica; surge, Job Flyway) | ~4,6 GB |
-| **Còn dư** | **~1 GB** |
+| Envoy Gateway (controller 256 Mi, Envoy 1 replica 128 Mi, shutdown-manager 32 Mi) + trust-manager 64 Mi ([ADR-0013](../../docs/adr/0013-gateway-api-envoy-gateway-shared-edge.md)) | ~480 MiB |
+| **Còn dư** | **~520 MiB** |
 
-Redis (Giai đoạn 3) và OpenSearch (Giai đoạn 6) chưa có trong bảng: tới giai đoạn đó phải tính lại.
+Redis (Giai đoạn 3) và OpenSearch (Giai đoạn 6) chưa có trong bảng: tới giai đoạn đó phải tính lại. dnsmasq và Mailpit chạy trên `gw` nên không tính vào bảng này. Dòng Envoy Gateway là limit đặt tay theo benchmark của bản v1.10.0, phải đo lại ở G0.
 
 Đây là ước lượng cho lab, không phải số đo. OpenSearch nên chỉ bật khi cần. Đổi RAM của VM rất dễ: `Stop-VM`, `Set-VMMemory -VMName <vm> -StartupBytes 10GB`, `Start-VM`.
 
@@ -893,16 +896,96 @@ kubectl delete pod/test-pvc pvc/test-pvc
 
 Cả hai đều chạy được nghĩa là cả chuỗi đã thông: Mac → Tailscale → gw → mạng lab → MetalLB → pod, và pod có ổ lưu dữ liệu.
 
-### 8.6 (Tùy chọn) Gateway API thay cho Ingress
+### 8.6 Cửa vào cụm: Gateway API với Envoy Gateway (bắt buộc)
 
-Dự án `ingress-nginx` đã ngừng phát triển và được lưu trữ (archive) từ 24/03/2026. Kubernetes khuyến nghị dùng **Gateway API**. Một bản cài phổ biến là Envoy Gateway (v1.10.0 vào 11/2026):
+Mọi traffic từ trình duyệt vào cụm đi qua **Gateway API** (CRD standard channel **v1.6.1**) hiện thực bằng **Envoy Gateway v1.10.0**, qua một Gateway dùng chung tên **`edge`** (namespace `edge`, listener HTTPS wildcard `*.lab.internal`, HTTP chuyển sang HTTPS). Không dùng Ingress hay `ingress-nginx`: Ingress API đã đóng băng, còn `ingress-nginx` ngừng phát triển và được lưu trữ (archive) từ 24/03/2026. Quyết định ở [ADR-0013](../../docs/adr/0013-gateway-api-envoy-gateway-shared-edge.md), checklist và nguồn ở [cluster-entry.md](../../docs/standards/cluster-entry.md).
+
+- **Cài bằng GitOps, không `helm install` tay.** CRD Gateway API, Envoy Gateway (chart `oci://docker.io/envoyproxy/gateway-helm`, ghim `v1.10.0`, không cài CRD từ chart), `GatewayClass envoy`, `EnvoyProxy` và Gateway `edge` thuộc app `platform` của repo `gitops`. Thứ tự sync wave: CRD Gateway API → cert-manager → trust-manager và Envoy Gateway → Gateway `edge`, `ClusterIssuer lab-ca` → app ([gitops-argocd.md](../../docs/standards/gitops-argocd.md)). Vì vậy mục này cần Argo CD đã bootstrap và CA của mục 8.8.
+- **Tương thích:** Envoy Gateway v1.10 hỗ trợ Kubernetes v1.34–v1.37 và hết hỗ trợ ngày 05/05/2027. Mỗi lần nâng cụm phải xem lại bảng matrix (mục 10.6).
+- **Tài nguyên ở lab:** Envoy 1 replica, limit đặt tay: controller 256 Mi, Envoy 128 Mi, shutdown-manager 32 Mi (đã tính trong bảng RAM ở mục 0).
+- **IP cố định:** Service của Envoy nhận `10.20.0.200` từ MetalLB qua annotation `metallb.io/loadBalancerIPs` (đặt trong `EnvoyProxy`), giữ `externalTrafficPolicy: Local`. Trước khi sync, kiểm không Service LoadBalancer nào khác đang giữ IP này (`kubectl get svc -A | grep 10.20.0.200`), vì IP này nằm trong dải tự cấp `lab-pool` của mục 8.4.
+
+Kiểm tra sau khi sync (bảng đầy đủ ở mục "Bằng chứng cần có" của [cluster-entry.md](../../docs/standards/cluster-entry.md#bằng-chứng-cần-có)):
 
 ```bash
-helm install eg oci://docker.io/envoyproxy/gateway-helm --version v1.10.0 -n envoy-gateway-system --create-namespace
-kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway --for=condition=Available
+kubectl -n edge get gateway edge                                           # PROGRAMMED True
+kubectl -n envoy-gateway-system get svc -l app.kubernetes.io/name=envoy    # EXTERNAL-IP 10.20.0.200
+curl -sI http://app.lab.internal | head -n 3                               # sau mục 8.7: 301, Location https://...
 ```
 
-Trước khi cài, xem bảng tương thích phiên bản Kubernetes của Envoy Gateway (chưa xác minh với 1.37). Gateway sẽ nhận một IP từ MetalLB.
+### 8.7 DNS `lab.internal`
+
+Domain của lab là **`lab.internal`** ([ADR-0014](../../docs/adr/0014-lab-pki-and-dns.md)); ICANN giữ `.INTERNAL` cho dùng riêng. Một nguồn sự thật duy nhất: **dnsmasq trên `gw`** trả mọi `*.lab.internal` về `10.20.0.200` (Gateway `edge`). Mac hỏi qua split DNS của Tailscale, pod hỏi qua CoreDNS. Thêm hostname mới không phải sửa DNS.
+
+**1. dnsmasq trên `gw`.** Cài gói `dnsmasq` của Debian, thêm một file trong `/etc/dnsmasq.d/` với đúng bốn dòng ở checklist "DNS của lab" của [cluster-entry.md](../../docs/standards/cluster-entry.md#dns-của-lab):
+
+```
+no-resolv
+bind-interfaces
+listen-address=10.20.0.5
+address=/lab.internal/10.20.0.200
+```
+
+dnsmasq chỉ phục vụ `lab.internal`, không làm resolver mở. Sau khi cài, kiểm `/etc/resolv.conf` của `gw` vẫn là `1.1.1.1`/`8.8.8.8`; gói dnsmasq của Debian có hook đổi resolver của máy sang chính nó khi có `resolvconf` (chưa xác minh trên Debian 12). Kiểm từ Mac:
+
+```bash
+dig @10.20.0.5 app.lab.internal +short      # 10.20.0.200
+dig @10.20.0.5 example.com +short           # không trả IP nào
+```
+
+**2. Split DNS của Tailscale.** login.tailscale.com → **DNS** → **Add nameserver** → **Custom**: `10.20.0.5`, bật **Restrict to domain** với `lab.internal`. IP này tới được qua subnet route `10.20.0.0/24` (grant ở Phụ lục A3 đã cho phép). Trên Mac, Tailscale phải bật dùng DNS của Tailscale. Kiểm bằng `dscacheutil` (không dùng `nslookup`, vì nó có thể không đi qua cấu hình DNS của macOS):
+
+```bash
+dscacheutil -q host -a name app.lab.internal    # ip_address: 10.20.0.200
+```
+
+`gw` vẫn giữ `--accept-dns=false` (mục 5); bản thân `gw` không cần phân giải `lab.internal`.
+
+**3. CoreDNS trong cụm.** Pod cũng cần tên này (`seller-web` gọi `https://auth.lab.internal`, `channel-connector` gọi `https://shopee-sim.lab.internal`). Thêm server block vào ConfigMap `kube-system/coredns` (`kubectl -n kube-system edit configmap coredns`), đặt sau block `.:53`:
+
+```
+lab.internal:53 {
+    errors
+    cache 30
+    forward . 10.20.0.5
+}
+```
+
+Nameserver phải là IP. Plugin `reload` nạp thay đổi trong khoảng 2 phút. `kubeadm upgrade` có thể ghi đè Corefile, nên sau mỗi lần nâng cụm phải diff lại ConfigMap này (mục 10.6). Kiểm:
+
+```bash
+kubectl run -it --rm dns --image=busybox:stable --restart=Never -- nslookup auth.lab.internal   # 10.20.0.200
+```
+
+### 8.8 CA của lab: root offline, tin root trên Mac
+
+Lab dùng CA nội bộ, không dùng chứng chỉ công khai ([ADR-0014](../../docs/adr/0014-lab-pki-and-dns.md)). Thông số và nguồn ở mục "PKI và cert-manager" của [cluster-entry.md](../../docs/standards/cluster-entry.md#pki-và-cert-manager).
+
+1. **Tạo root CA một lần, offline trên Mac**, bằng `openssl` theo script trong repo `platform` (viết ở G0; script không chứa khóa): hạn 10 năm, `CA:TRUE`, `keyCertSign, cRLSign`, **name constraints critical** chỉ cho `lab.internal`, `svc`, `svc.cluster.local`. Khóa root **không vào Git và không vào cụm**; cất ngoài máy (ổ mã hóa hoặc password manager, như bản backup khóa Sealed Secrets). Phần công khai `lab-root-ca.crt` để trong repo `platform`. Mất khóa root thì phải tạo root mới và tin lại ở mọi nơi.
+2. **Tạo intermediate CA** (hạn 2 năm, cũng có name constraints) ký bằng root, rồi seal thành Sealed Secret `lab-intermediate-ca` ở namespace `cert-manager` (`tls.crt` chứa intermediate rồi root, kèm `tls.key`) và commit vào `gitops`. App `platform` tạo `ClusterIssuer lab-ca` từ Secret này, cert-manager cấp chứng chỉ wildcard `*.lab.internal` cho Gateway `edge`. Dựng lại cụm không phải tạo lại root hay tin lại. Đặt lịch nhắc xoay intermediate trước khi hết hạn 60 ngày.
+3. **Tin root trên Mac** (Keychain hệ thống):
+
+   ```bash
+   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain lab-root-ca.crt
+   ```
+
+   Safari và Chrome đọc Keychain; Firefox có đọc không là **chưa xác minh** (nếu không thì import tay). Kiểm: mở `https://argocd.lab.internal` bằng Safari và Chrome không có cảnh báo; `curl --cacert lab-root-ca.crt -v https://app.lab.internal` thấy chuỗi wildcard ← intermediate ← root.
+4. Mọi client mới gọi vào lab (máy khác, runner CI, k6) đều phải tin root này trước. Trong cụm, pod tin root qua trust bundle do trust-manager sinh, chart `app` tự mount ([helm-chart.md](../../docs/standards/helm-chart.md)).
+
+Safari, JDK và Node có thực thi name constraints trên root do người dùng thêm vào hay không: **chưa xác minh**, kiểm theo bảng bằng chứng của cluster-entry.md khi dựng G0.
+
+### 8.9 Mailpit trên `gw`
+
+Keycloak gửi email xác minh và quên mật khẩu tới **Mailpit v1.33.1** chạy trên `gw`, không chạy trong cụm (không tốn RAM của cụm). Cài binary vào `/usr/local/bin` và chạy bằng systemd với user riêng, `MemoryMax=128M`; `gw` không cài Docker (lý do ở mục 6). Tham số: SMTP `10.20.0.5:1025`, UI và API `10.20.0.5:8025`, `--compression 0`, `--max 500`, `--max-message-size` nhỏ. Thông số và nguồn theo checklist "Mailpit trên `gw`" của [cluster-entry.md](../../docs/standards/cluster-entry.md#mailpit-trên-gw).
+
+- Realm của Keycloak (trong `gitops`) đặt SMTP `10.20.0.5:1025`. Mac và runner CI đọc thư ở `http://10.20.0.5:8025`, không qua Gateway.
+- SMTP không TLS, UI không xác thực: chấp nhận vì chỉ tới được trong lab và tailnet.
+- `gw` chỉ có 2 GB mà đang chạy Tailscale, registry, dnsmasq, Mailpit (và RustFS từ mục 12.1): đo RAM thật ở G0.
+
+```bash
+systemctl show mailpit -p MemoryCurrent                 # trên gw: < 128 MiB
+curl -s http://10.20.0.5:8025/api/v1/messages | head    # từ Mac
+```
 
 ---
 
@@ -1007,7 +1090,8 @@ Tắt hẳn một worker (`Stop-VM k8s-w2 -TurnOff`) chính là cách giả lậ
   1. Trên mọi node: đổi `v1.37` thành `v1.38` trong `/etc/apt/sources.list.d/kubernetes.list`, rồi `apt-get update`.
   2. `k8s-cp`: `apt-mark unhold kubeadm`, cài bản kubeadm mới, `apt-mark hold kubeadm`; `sudo kubeadm upgrade plan`; `sudo kubeadm upgrade apply v1.38.x`; drain, nâng `kubelet` và `kubectl` theo cách tương tự, `systemctl restart kubelet`, uncordon.
   3. Từng worker: nâng kubeadm, `sudo kubeadm upgrade node`, drain (chạy từ Mac), nâng kubelet và kubectl, restart kubelet, uncordon.
-  4. Xem tài liệu "Upgrading kubeadm clusters" của đúng phiên bản đích trước khi làm, vì mỗi bản có thể có lưu ý riêng.
+  4. Xem tài liệu "Upgrading kubeadm clusters" của đúng phiên bản đích trước khi làm, vì mỗi bản có thể có lưu ý riêng. Đọc thêm bảng tương thích của Envoy Gateway và cert-manager với bản Kubernetes đích ([ADR-0013](../../docs/adr/0013-gateway-api-envoy-gateway-shared-edge.md)).
+  5. Sau khi nâng: diff ConfigMap `kube-system/coredns` với bản trước khi nâng, đưa lại server block `lab.internal` nếu mất, rồi test phân giải `auth.lab.internal` từ pod (mục 8.7). Docs Kubernetes không nhất quán về việc `kubeadm upgrade` có giữ Corefile hay không ([ADR-0014](../../docs/adr/0014-lab-pki-and-dns.md)).
 
 ---
 
@@ -1030,6 +1114,9 @@ Tắt hẳn một worker (`Stop-VM k8s-w2 -TurnOff`) chính là cách giả lậ
 | PVC kẹt `Pending` | Không có StorageClass mặc định | `kubectl get sc`; làm lại mục 8.2 |
 | Service LoadBalancer kẹt `<pending>` | MetalLB chưa chạy hoặc chưa có IPAddressPool | `kubectl get pods,ipaddresspool,l2advertisement -n metallb-system` |
 | Có EXTERNAL-IP nhưng không truy cập được | ARP của MetalLB bị chặn | Thử `Set-VMNetworkAdapter -VMName k8s-w1,k8s-w2,k8s-cp -MacAddressSpoofing On` |
+| Mac không phân giải `*.lab.internal` | Chưa có split DNS, Tailscale trên Mac không dùng DNS của Tailscale, hoặc dnsmasq trên `gw` không chạy | `dig @10.20.0.5 app.lab.internal +short`; trên gw: `systemctl status dnsmasq`; làm lại mục 8.7 bước 1–2 |
+| Pod không phân giải `*.lab.internal` | Thiếu server block trong CoreDNS, thường sau `kubeadm upgrade` | `kubectl -n kube-system get configmap coredns -o yaml`; làm lại mục 8.7 bước 3 |
+| Trình duyệt cảnh báo chứng chỉ ở `*.lab.internal` | Mac chưa tin root, hoặc Gateway `edge` chưa có chứng chỉ | Làm lại mục 8.8 bước 3; `kubectl -n edge get certificate` phải `Ready` |
 | Pod `ImagePullBackOff` với image `10.20.0.5:5000/...` | Thiếu `hosts.toml` hoặc `config_path`, hoặc chưa restart containerd | Trên node: `cat /etc/containerd/certs.d/10.20.0.5:5000/hosts.toml`, `grep config_path /etc/containerd/config.toml`, `sudo systemctl restart containerd`; thử `sudo crictl pull 10.20.0.5:5000/<image>` |
 | Mac không đẩy được image lên registry | Thiếu `insecure-registries` trong Docker Desktop, hoặc registry trên `gw` không chạy | Mục 9 bước 1; trên gw: `systemctl status docker-registry` |
 | Pod chạy lỗi `exec format error` | Image arm64 build trên Mac | Build lại với `--platform linux/amd64` |
@@ -1261,5 +1348,6 @@ Làm vào một cuối tuần, khi lab không chạy thí nghiệm.
 - containerd và Docker: [containerd getting started](https://github.com/containerd/containerd/blob/main/docs/getting-started.md) · [Cấu hình registry (hosts.toml, config_path)](https://github.com/containerd/containerd/blob/main/docs/hosts.md) · [Kho apt của Docker cho Debian](https://docs.docker.com/engine/install/debian/)
 - Calico: [Cài trên cụm tự quản lý](https://docs.tigera.io/calico/latest/getting-started/kubernetes/self-managed-onprem/onpremises) · [Yêu cầu hệ thống](https://docs.tigera.io/calico/latest/getting-started/kubernetes/requirements) · [Releases](https://github.com/projectcalico/calico/releases)
 - MetalLB: [Cài đặt (strictARP chỉ cho IPVS, Helm)](https://metallb.io/installation/) · [Cấu hình L2](https://metallb.io/configuration/) · [Releases](https://github.com/metallb/metallb/releases)
+- Cửa vào cụm, DNS, CA, Mailpit (tra 13/11/2026; danh sách đầy đủ ở [cluster-entry.md](../../docs/standards/cluster-entry.md#nguồn)): [Kubernetes – Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/) · [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases) · [Envoy Gateway – Compatibility matrix](https://gateway.envoyproxy.io/news/releases/matrix/) · [Envoy Gateway – Install with Argo CD](https://gateway.envoyproxy.io/docs/install/install-argocd/) · [MetalLB – Usage](https://metallb.io/usage/) · [cert-manager – CA](https://cert-manager.io/docs/configuration/ca/) · [trust-manager](https://cert-manager.io/docs/trust/trust-manager/) · [ICANN – `.INTERNAL`](https://www.icann.org/en/board-activities-and-meetings/materials/approved-resolutions-special-meeting-of-the-icann-board-29-07-2024-en) · [dnsmasq man page](https://thekelleys.org.uk/dnsmasq/docs/dnsmasq-man.html) · [Tailscale – DNS](https://tailscale.com/kb/1054/dns) · [Customizing DNS Service (CoreDNS)](https://kubernetes.io/docs/tasks/administer-cluster/dns-custom-nameservers/) · [Reconfiguring a kubeadm cluster](https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/kubeadm-reconfigure/) · `man security` (macOS) · [Chrome Root Store FAQ](https://chromium.googlesource.com/chromium/src/+/main/net/data/ssl/chrome_root_store/faq.md) · [Mailpit – Install](https://mailpit.axllent.org/docs/install/) · [Mailpit – Runtime options](https://mailpit.axllent.org/docs/configuration/runtime-options/)
 - Add-on khác: [local-path-provisioner](https://github.com/rancher/local-path-provisioner) · [metrics-server](https://github.com/kubernetes-sigs/metrics-server) · [Envoy Gateway quickstart](https://gateway.envoyproxy.io/docs/tasks/quickstart/) · [Strimzi quickstart](https://strimzi.io/quickstarts/) · [CloudNativePG releases](https://github.com/cloudnative-pg/cloudnative-pg/releases)
 - Spring Boot 4.1: Gradle plugin, Packaging OCI Images (`bootBuildImage`)

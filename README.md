@@ -6,7 +6,7 @@ Hạ tầng và công cụ dùng chung cho mọi repo của commerce-hub.
 |---|---|
 | `compose/` | Docker Compose dựng hạ tầng chạy local (PostgreSQL, Kafka, Schema Registry, Keycloak, ...) |
 | `kind/` | Cấu hình cụm kind và add-on |
-| `charts/` | Helm chart dùng chung (ví dụ `spring-service`), publish lên OCI registry |
+| `charts/` | Helm chart dùng chung `app` cho mọi workload (service, `marketplace-sim`, `seller-web`), publish lên OCI registry (theo ticket 11 trong `docs/.scratch/architecture-g0-g1/`) |
 | `docs/` | Hướng dẫn dựng hạ tầng (homelab Hyper-V) |
 | `.github/workflows/` | Reusable workflow cho CI của các repo service (sẽ thêm) |
 
