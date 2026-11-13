@@ -1,6 +1,6 @@
 # Script tạo và kiểm repo GitHub
 
-Tạo và cấu hình mọi repo của commerce-hub bằng một lệnh, thay cho bấm tay trên GitHub. Chuẩn áp dụng: [ADR-0006](https://github.com/hoangduoc0603/docs/blob/main/adr/0006-public-repos-on-personal-account.md) và các mục "Repo public", "Nhánh và cập nhật phụ thuộc" của `docs/standards/ci-cd.md`.
+Tạo và cấu hình mọi repo của commerce-hub bằng một lệnh, thay cho bấm tay trên GitHub. Chuẩn áp dụng: [ADR-0006](https://github.com/hoangduoc0603/commerce-hub-docs/blob/main/adr/0006-public-repos-on-personal-account.md) và các mục "Repo public", "Nhánh và cập nhật phụ thuộc" của `docs/standards/ci-cd.md`.
 
 | File | Việc |
 |---|---|
@@ -10,13 +10,15 @@ Tạo và cấu hình mọi repo của commerce-hub bằng một lệnh, thay ch
 
 Cần `gh` (đã `gh auth login`, scope `repo`), `jq`, `git`.
 
+Tên repo trên GitHub luôn có prefix `commerce-hub-`; thư mục local giữ tên ngắn. Truyền tên ngắn (`platform`, `hello`) thì script tự thêm prefix: `platform/` ↔ `hoangduoc0603/commerce-hub-platform`.
+
 ## Thêm một repo mới
 
 ```bash
 mkdir -p ~/Desktop/sys-craft/lab/commerce-hub/services/foo && cd $_ && git init -b main
 ../../platform/scripts/github/repo-bootstrap.sh foo --local . --ecosystems gradle,docker --description "..."
 git add -A && git commit -m "chore: khởi tạo repo"
-../../platform/scripts/github/repo-audit.sh foo --local . --ecosystems gradle,docker   # phải "Tất cả PASS" trước khi push
+../../platform/scripts/github/repo-audit.sh foo --local . --ecosystems gradle,docker   # phải "Tất cả PASS" trước khi push. Repo trên GitHub: commerce-hub-foo
 git push -u origin main
 ```
 

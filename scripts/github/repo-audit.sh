@@ -2,7 +2,7 @@
 # Kiểm một repo commerce-hub có đạt chuẩn repo public không. Chỉ đọc, không sửa gì.
 # In PASS/FAIL theo từng tiêu chí; exit 1 nếu có FAIL.
 #
-#   repo-audit.sh <name|owner/name> [--local <đường dẫn clone>] [--ecosystems gradle,docker,...]
+#   repo-audit.sh <name|owner/name>   (name ngắn như "platform" thành "commerce-hub-platform") [--local <đường dẫn clone>] [--ecosystems gradle,docker,...]
 #
 # --local: kiểm thêm phần chỉ có ở bản clone: file scaffold, .gitignore, và email trong history.
 #          Chạy trước lần push đầu để chặn email thật lọt lên repo public.

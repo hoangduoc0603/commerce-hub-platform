@@ -46,14 +46,21 @@ need() {
   done
 }
 
-# owner/name từ tham số; thiếu owner thì lấy login của tài khoản gh đang đăng nhập.
+# Mọi repo trên GitHub có prefix này để không lẫn với dự án khác trên tài khoản cá nhân
+# (ADR-0006, mục "Đặt tên repo"). Thư mục local giữ tên ngắn: platform/ ↔ commerce-hub-platform.
+readonly REPO_PREFIX="commerce-hub-"
+
+# owner/name từ tham số. Tên ngắn (platform, services/hello → hello) được thêm REPO_PREFIX;
+# thiếu owner thì lấy login của tài khoản gh đang đăng nhập. owner/name đầy đủ thì giữ nguyên.
 resolve_repo() {
-  local arg="$1"
+  local arg="$1" name
   if [[ "$arg" == */* ]]; then
     printf '%s' "$arg"
-  else
-    printf '%s/%s' "$(gh api user --jq .login)" "$arg"
+    return
   fi
+  name="$arg"
+  [[ "$name" == "$REPO_PREFIX"* ]] || name="${REPO_PREFIX}${name}"
+  printf '%s/%s' "$(gh api user --jq .login)" "$name"
 }
 
 # GET qua gh api, in body khi thành công; lỗi (404, repo chưa có) thì in <mặc định>.

@@ -2,7 +2,7 @@
 # Tạo (nếu chưa có) và cấu hình một repo commerce-hub theo chuẩn repo public. Chạy lại bao nhiêu lần
 # cũng được: mỗi mục đọc trạng thái hiện tại, chỉ ghi khi lệch, cuối cùng in số thay đổi.
 #
-#   repo-bootstrap.sh <name|owner/name> [--local <đường dẫn clone>] [--ecosystems gradle,docker,...]
+#   repo-bootstrap.sh <name|owner/name>   (name ngắn như "platform" thành "commerce-hub-platform") [--local <đường dẫn clone>] [--ecosystems gradle,docker,...]
 #                     [--description "..."] [--dry-run]
 #
 # --local:      cũng scaffold file trong bản clone (LICENSE MIT, khối .gitignore, .github/dependabot.yml)
