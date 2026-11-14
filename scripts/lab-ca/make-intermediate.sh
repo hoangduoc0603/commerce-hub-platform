@@ -15,7 +15,10 @@
 # Biến môi trường:
 #   LAB_CA_DIR       thư mục chứa khóa root (mặc định ~/lab-ca).
 #   LAB_CA_ROOT      chứng chỉ root (mặc định <platform>/pki/lab-root-ca.crt).
-#   LAB_INT_SUBJECT  subject (mặc định "/O=commerce-hub lab/CN=commerce-hub lab intermediate CA <YYYY-MM>").
+#   LAB_INT_SUBJECT  subject (mặc định "/O=commerce-hub lab/CN=commerce-hub lab intermediate CA <YYYYMMDD-HHMM>"; có
+#                    giờ để intermediate xoay khẩn cấp trong cùng tháng không trùng subject với cái cũ).
+#   LAB_KUBE_CONTEXT context kubectl để kubeseal lấy chứng chỉ sealing (mặc định homelab). Ghim để không seal nhầm
+#                    bằng khóa của cụm khác (vd. cụm kind diễn tập) khi context hiện tại đang trỏ chỗ khác.
 #   LAB_SEAL_CERT    chứng chỉ sealing để seal offline (`kubeseal --fetch-cert`). Test dùng khóa sealing giả.
 #   LAB_CA_PASSFILE  file chứa passphrase của khóa root, thay cho hỏi tương tác. Chỉ dùng cho test-constraints.sh.
 #   OPENSSL          đường dẫn openssl (mặc định tự tìm OpenSSL 3/4, bỏ qua LibreSSL của macOS).
@@ -44,7 +47,8 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ca_dir=${LAB_CA_DIR:-$HOME/lab-ca}
 root_crt=${LAB_CA_ROOT:-$repo_root/pki/lab-root-ca.crt}
 root_key=$ca_dir/lab-root-ca.key
-subject=${LAB_INT_SUBJECT:-/O=commerce-hub lab/CN=commerce-hub lab intermediate CA $(date +%Y-%m)}
+subject=${LAB_INT_SUBJECT:-/O=commerce-hub lab/CN=commerce-hub lab intermediate CA $(date -u +%Y%m%d-%H%M)}
+kube_context=${LAB_KUBE_CONTEXT:-homelab}
 days=730
 
 [[ -r $root_key ]] || die "không đọc được khóa root $root_key"
@@ -86,7 +90,12 @@ echo "Ký intermediate bằng khóa root, hạn $days ngày (nhập passphrase c
 cat "$work/int.crt" "$root_crt" >"$work/chain.crt"
 
 seal_args=(--format yaml)
-[[ -n ${LAB_SEAL_CERT:-} ]] && seal_args+=(--cert "$LAB_SEAL_CERT")
+if [[ -n ${LAB_SEAL_CERT:-} ]]; then
+  seal_args+=(--cert "$LAB_SEAL_CERT")
+else
+  seal_args+=(--context "$kube_context")
+  echo "Seal bằng chứng chỉ của controller trên context $kube_context"
+fi
 
 # kubectl --dry-run=client chỉ dựng manifest (và kiểm cặp khóa/chứng chỉ khớp), không gọi API server.
 # Secret dạng rõ chỉ đi qua pipe sang kubeseal, không ghi ra đĩa.

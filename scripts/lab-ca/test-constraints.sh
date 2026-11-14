@@ -141,12 +141,9 @@ check "intermediate: CA:TRUE, pathlen:0" grep -q 'CA:TRUE, pathlen:0' <<<"$iext"
 check "intermediate: keyUsage keyCertSign, cRLSign" grep -q 'Certificate Sign, CRL Sign' <<<"$iext"
 check "intermediate: nameConstraints critical" grep -q 'Name Constraints: critical' <<<"$iext"
 check "intermediate: nameConstraints cấm IP" grep -q 'IP:0.0.0.0/0.0.0.0' <<<"$iext"
-days_valid() { # hạn 730 ngày (±1 ngày do làm tròn giờ)
-  local nb na
-  nb=$(openssl x509 -in realint.crt -noout -startdate | cut -d= -f2)
-  na=$(openssl x509 -in realint.crt -noout -enddate | cut -d= -f2)
-  local d=$(( ($(date -j -f '%b %e %T %Y %Z' "$na" +%s) - $(date -j -f '%b %e %T %Y %Z' "$nb" +%s)) / 86400 ))
-  (( d >= 729 && d <= 731 ))
+days_valid() { # còn hiệu lực sau 729 ngày, hết sau 731 ngày: hạn 730 ngày. Không parse ngày (date -j chỉ có ở BSD).
+  openssl x509 -in realint.crt -noout -checkend $((729 * 86400)) >/dev/null \
+    && ! openssl x509 -in realint.crt -noout -checkend $((731 * 86400)) >/dev/null
 }
 check "intermediate: hạn 730 ngày" days_valid
 verify_int() { openssl verify -CAfile root.crt realint.crt; }
