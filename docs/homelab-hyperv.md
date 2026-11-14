@@ -1052,6 +1052,14 @@ Lab dùng CA nội bộ, không dùng chứng chỉ công khai ([ADR-0014](../..
    - **Vì sao cấm IP:** name constraints chỉ ràng buộc loại tên được liệt kê (RFC 5280 §4.2.1.10). Chỉ ghi DNS thì chứng chỉ mang IP SAN không bị ràng buộc gì, và ai lấy được khóa intermediate trong cụm vẫn ký được chứng chỉ cho một IP bất kỳ mà Mac tin. Lab truy cập HTTPS bằng tên, không cần IP SAN.
    - `test-constraints.sh` dựng intermediate **không** có ràng buộc riêng (tình huống lộ khóa intermediate) và kiểm OpenSSL từ chối `evil.example.com`, `lab.internal.evil.com`, `evillab.internal`, leaf có thêm một tên ngoài, leaf có IP SAN. Đây mới là bằng chứng của OpenSSL; Chrome, Safari, `curl` kiểm ở ticket G0-06, JVM và Node ở G0-07.
 2. **Tạo intermediate CA** (hạn 2 năm, cũng có name constraints) ký bằng root, rồi seal thành Sealed Secret `lab-intermediate-ca` ở namespace `cert-manager` (`tls.crt` chứa intermediate rồi root, kèm `tls.key`) và commit vào `gitops`. App `platform` tạo `ClusterIssuer lab-ca` từ Secret này, cert-manager cấp chứng chỉ wildcard `*.lab.internal` cho Gateway `edge`. Dựng lại cụm không phải tạo lại root hay tin lại. Đặt lịch nhắc xoay intermediate trước khi hết hạn 60 ngày.
+
+   Làm bằng script (G0-06), chạy trên Mac, context `homelab` có controller Sealed Secrets:
+
+   ```bash
+   scripts/lab-ca/make-intermediate.sh ../gitops/infra/lab-ca/lab-intermediate-ca.sealedsecret.yaml   # hỏi passphrase root một lần
+   ```
+
+   Khóa intermediate dạng rõ chỉ nằm trong thư mục tạm và bị xóa sau khi seal; bản lưu duy nhất là SealedSecret trong `gitops` (giải mã được nhờ bản sao lưu khóa sealing). Intermediate hiện tại hết hạn **2028-11-13**, nhắc xoay từ **2028-09-14**: chạy lại với `--replace`, commit, rồi `cmctl renew --all-namespaces --all` để leaf được ký lại.
 3. **Tin root trên Mac** (Keychain hệ thống):
 
    ```bash
