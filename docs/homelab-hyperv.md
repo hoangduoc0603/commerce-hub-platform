@@ -736,6 +736,15 @@ kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/$CALICO
 curl -fsSLO https://raw.githubusercontent.com/projectcalico/calico/$CALICO/manifests/custom-resources.yaml
 sed -i 's#cidr: 192.168.0.0/16#cidr: 10.244.0.0/16#' custom-resources.yaml
 grep -n 'cidr\|encapsulation' custom-resources.yaml     # cidr: 10.244.0.0/16, encapsulation: VXLANCrossSubnet
+
+# Bỏ hai document Goldmane và Whisker (lý do ở ghi chú dưới). awk của Debian (mawk) chạy được, không cần cài yq.
+awk '
+  /^---$/ { if (!skip) printf "%s", buf; buf = ""; skip = 0 }
+  /^kind: (Goldmane|Whisker)$/ { skip = 1 }
+  { buf = buf $0 "\n" }
+  END { if (!skip) printf "%s", buf }
+' custom-resources.yaml > cr.yaml && mv cr.yaml custom-resources.yaml
+grep '^kind:' custom-resources.yaml     # đúng 2 dòng: Installation, APIServer. Khác thì file thượng nguồn đã đổi, mở ra sửa tay
 kubectl create -f custom-resources.yaml
 
 watch kubectl get tigerastatus          # đợi mọi dòng AVAILABLE=True (vài phút), Ctrl+C để thoát
@@ -746,6 +755,8 @@ kubectl get pods -n kube-system -l k8s-app=kube-dns    # coredns Running
 - Calico cài theo kiểu **operator**: `tigera-operator` đọc CR `Installation` trong `custom-resources.yaml` rồi tự dựng và quản lý các thành phần Calico. Đây cũng là cách Strimzi và CloudNativePG hoạt động sau này.
 - **`VXLANCrossSubnet`**: gói tin giữa các node cùng subnet (cả 3 node đều ở `10.20.0.0/24`) đi thẳng, không bọc. Chỉ khi khác subnet mới bọc VXLAN.
 - Phải sửa `cidr` cho khớp `podSubnet`. Phần hướng dẫn cài bằng operator của Calico không nói nó tự nhận dải của kubeadm.
+- **Không cài Goldmane và Whisker.** Từ Calico v3.30, `custom-resources.yaml` mặc định còn tạo CR `Goldmane` (gom flow log từ Felix, mở qua gRPC) và `Whisker` (UI xem flow log). Lab bỏ cả hai vì ngân sách RAM ([ADR-0004](../../docs/adr/0004-single-instance-by-default-on-homelab.md), ticket kiến trúc 04) đã tính là tắt, quan sát của dự án đi qua stack LGTM, và cả hai còn là technology preview ([Calico – Enable Whisker](https://docs.tigera.io/calico/latest/observability/enable-whisker), tra 2026-11-14). Đo trên cụm: goldmane 30 Mi, whisker 33 Mi.
+- **Tắt trên cụm đã cài:** `kubectl delete whisker default` rồi `kubectl delete goldmane default`. Docs Calico chỉ hướng dẫn bật, không ghi cách tắt; hành vi dưới đây là quan sát thực tế ngày 2026-11-14 với v3.33.0. Operator gỡ Deployment, Service của hai thành phần và bỏ biến `FELIX_FLOWLOGSGOLDMANESERVER` khỏi DaemonSet `calico-node`, nên `calico-node` rolling restart (`generation` tăng 1); node vẫn `Ready`. Log operator có thể in vài dòng `Reconciler error ... the object has been modified`: đó là xung đột ghi `Installation` giữa hai controller, tự thử lại, vô hại. Kiểm: `kubectl get tigerastatus` không còn `goldmane`, `whisker` và mọi dòng `AVAILABLE=True`.
 
 ### 7.4 Thêm 2 worker
 
@@ -775,6 +786,14 @@ kubectl get csr                                    # Approved,Issued
 
 - Kubernetes không tự duyệt loại CSR này. Duyệt hàng loạt như trên chỉ ổn trong lab. Cụm thật phải kiểm tra tên và IP trong từng CSR, hoặc dùng controller duyệt tự động như `kubelet-csr-approver`.
 - Certificate này hết hạn sau 1 năm. kubelet tự xin cert mới, khi đó lại có CSR `Pending` cần duyệt. Thêm node mới cũng vậy.
+
+**3. Dàn lại CoreDNS ra các node.** CoreDNS được tạo lúc `kubeadm init`, khi cụm mới có `k8s-cp`, nên cả 2 pod nằm trên node này. Deployment của kubeadm chỉ có anti-affinity `preferred`, không tự dàn lại khi worker join. Mất `k8s-cp` là mất DNS trong cụm (quan sát 2026-11-14, ticket G0-02).
+
+```bash
+kubectl -n kube-system rollout restart deploy/coredns
+kubectl -n kube-system rollout status deploy/coredns
+kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide   # 2 pod trên 2 node khác nhau
+```
 
 ---
 
@@ -917,27 +936,56 @@ curl -sI http://app.lab.internal | head -n 3                               # sau
 
 Domain của lab là **`lab.internal`** ([ADR-0014](../../docs/adr/0014-lab-pki-and-dns.md)); ICANN giữ `.INTERNAL` cho dùng riêng. Một nguồn sự thật duy nhất: **dnsmasq trên `gw`** trả mọi `*.lab.internal` về `10.20.0.200` (Gateway `edge`). Mac hỏi qua split DNS của Tailscale, pod hỏi qua CoreDNS. Thêm hostname mới không phải sửa DNS.
 
-**1. dnsmasq trên `gw`.** Cài gói `dnsmasq` của Debian, thêm một file trong `/etc/dnsmasq.d/` với đúng bốn dòng ở checklist "DNS của lab" của [cluster-entry.md](../../docs/standards/cluster-entry.md#dns-của-lab):
+**1. dnsmasq trên `gw`.** Viết file cấu hình **trước**, rồi mới cài gói `dnsmasq` của Debian: gói tự khởi động dịch vụ ngay khi cài, và nếu chưa có file này thì dnsmasq chạy cấu hình mặc định (nghe mọi interface, forward ra `1.1.1.1`, tức là resolver mở) cho tới lần restart. Năm dòng cấu hình theo checklist "DNS của lab" của [cluster-entry.md](../../docs/standards/cluster-entry.md#dns-của-lab):
 
-```
+```bash
+ssh gw
+sudo install -d -m 0755 /etc/dnsmasq.d
+sudo tee /etc/dnsmasq.d/lab-internal.conf >/dev/null <<'EOF'
+# DNS của lab: chỉ trả lời *.lab.internal, không làm resolver mở (ADR-0014, cluster-entry.md).
 no-resolv
 bind-interfaces
 listen-address=10.20.0.5
 address=/lab.internal/10.20.0.200
+# AAAA, MX... của tên trong lab.internal ra NOERROR rỗng (NODATA) thay vì REFUSED.
+local=/lab.internal/
+EOF
+sudo apt install -y dnsmasq
+sudo dnsmasq --test                       # dnsmasq: syntax check OK.
+sudo systemctl enable dnsmasq && sudo systemctl restart dnsmasq   # gói đã tự chạy lúc cài; restart để chắc đã nạp file cấu hình
+sudo ss -lunpt 'sport = :53'              # chỉ 10.20.0.5:53 (udp và tcp), không có 0.0.0.0:53
+cat /etc/resolv.conf                      # vẫn 1.1.1.1 / 8.8.8.8
 ```
 
-dnsmasq chỉ phục vụ `lab.internal`, không làm resolver mở. Sau khi cài, kiểm `/etc/resolv.conf` của `gw` vẫn là `1.1.1.1`/`8.8.8.8`; gói dnsmasq của Debian có hook đổi resolver của máy sang chính nó khi có `resolvconf` (chưa xác minh trên Debian 12). Kiểm từ Mac:
+- **`local=/lab.internal/`** là dòng thứ năm, thêm sau khi kiểm thật ngày 2026-11-14 (dnsmasq 2.90-4~deb12u2). Thiếu nó, truy vấn AAAA cho `x.lab.internal` trả `REFUSED`, vì `address=` chỉ có IPv4 nên dnsmasq định forward AAAA mà `no-resolv` không có upstream. macOS hỏi A và AAAA song song, nên `REFUSED` dễ bị coi là lỗi server. Có dòng này, AAAA ra `NOERROR` không có answer, đúng ngữ nghĩa "tên có, không có bản ghi IPv6".
+- **Hook `resolvconf`:** đã kiểm ngày 2026-11-14, `gw` không cài `resolvconf` hay `systemd-resolved`, và `/etc/resolv.conf` không đổi sau khi cài dnsmasq.
+- Gói Debian chạy dnsmasq với `--local-service`. Cờ này chỉ nhận truy vấn từ subnet nối trực tiếp, nên sẽ chặn Mac (IP tailnet `100.x`). Nó **không có tác dụng** khi có `listen-address` (theo `man dnsmasq`), nên Mac vẫn hỏi được.
+- RAM đo được: `MemoryCurrent` khoảng 0,7 MiB.
+
+Kiểm từ Mac:
 
 ```bash
-dig @10.20.0.5 app.lab.internal +short      # 10.20.0.200
-dig @10.20.0.5 example.com +short           # không trả IP nào
+dig @10.20.0.5 app.lab.internal +short                      # 10.20.0.200
+dig @10.20.0.5 a.b.lab.internal +short                      # 10.20.0.200 (address= phủ mọi mức subdomain)
+dig @10.20.0.5 app.lab.internal AAAA | grep status          # NOERROR (ANSWER: 0)
+dig @10.20.0.5 app.lab.internal +tcp +short                 # 10.20.0.200 (DNS qua TCP cũng phải chạy)
+dig @10.20.0.5 example.com | grep status                    # REFUSED: không phải resolver mở
 ```
 
 **2. Split DNS của Tailscale.** login.tailscale.com → **DNS** → **Add nameserver** → **Custom**: `10.20.0.5`, bật **Restrict to domain** với `lab.internal`. IP này tới được qua subnet route `10.20.0.0/24` (grant ở Phụ lục A3 đã cho phép). Trên Mac, Tailscale phải bật dùng DNS của Tailscale. Kiểm bằng `dscacheutil` (không dùng `nslookup`, vì nó có thể không đi qua cấu hình DNS của macOS):
 
 ```bash
+# Bản app trên macOS: CLI nằm trong bundle, có thể chưa có trong PATH
+/Applications/Tailscale.app/Contents/MacOS/Tailscale dns status | sed -n '/Split DNS Routes/,/Search Domains/p'   # có dòng lab.internal -> 10.20.0.5
+sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder            # bắt buộc nếu đã từng hỏi tên này trước khi cấu hình
 dscacheutil -q host -a name app.lab.internal    # ip_address: 10.20.0.200
+dscacheutil -q host -a name github.com          # vẫn ra IP công khai: split DNS không chiếm domain khác
 ```
+
+Quan sát ngày 2026-11-14 (Tailscale 1.104.5, macOS 27.2):
+
+- **Không có resolver `domain : lab.internal` trong `scutil --dns`, và đó là bình thường.** App Tailscale trên macOS đăng ký `100.100.100.100` làm resolver bổ sung (`Supplemental`) không gắn domain, xếp trước DNS của máy. Mọi truy vấn đi vào quad-100 trước, và quad-100 tự chia: `lab.internal` gửi tới `10.20.0.5`, tên khác gửi tới DNS của máy. Vì vậy kiểm việc chia bằng `tailscale dns status`, không bằng `scutil`.
+- **Kết quả âm bị cache rất lâu.** Nếu đã hỏi `x.lab.internal` trước khi thêm nameserver, `mDNSResponder` cache câu trả lời "không tồn tại" (đo bằng `dns-sd -G v4 x.lab.internal`: `No Such Record`, TTL 108002 giây). Phải xóa cache bằng lệnh `flushcache` ở trên thì mới thấy kết quả mới.
 
 `gw` vẫn giữ `--accept-dns=false` (mục 5); bản thân `gw` không cần phân giải `lab.internal`.
 
@@ -951,17 +999,58 @@ lab.internal:53 {
 }
 ```
 
-Nameserver phải là IP. Plugin `reload` nạp thay đổi trong khoảng 2 phút. `kubeadm upgrade` có thể ghi đè Corefile, nên sau mỗi lần nâng cụm phải diff lại ConfigMap này (mục 10.6). Kiểm:
+Nameserver phải là IP. CoreDNS chọn server block có zone cụ thể nhất, nên chỉ tên thuộc `lab.internal` đi block này; mọi tên khác vẫn qua block `.:53`. `kubeadm upgrade` có thể ghi đè Corefile, nên lưu Corefile ra file trước khi sửa, và sau mỗi lần nâng cụm diff lại ConfigMap này (mục 10.6).
+
+Cách sửa không tương tác (thay cho `kubectl edit`, tránh lỗi thụt lề của block scalar `Corefile: |`):
 
 ```bash
-kubectl run -it --rm dns --image=busybox:stable --restart=Never -- nslookup auth.lab.internal   # 10.20.0.200
+kubectl -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' > coredns-before.Corefile
+if grep -q '^lab.internal:53' coredns-before.Corefile; then
+  echo "Đã có block lab.internal:53, không thêm nữa"   # chạy lại (ví dụ sau kubeadm upgrade) an toàn
+else
+  { cat coredns-before.Corefile
+    [ -n "$(tail -c1 coredns-before.Corefile)" ] && echo   # bảo đảm block mới bắt đầu ở dòng mới
+    cat <<'EOF'
+lab.internal:53 {
+    errors
+    cache 30
+    forward . 10.20.0.5
+}
+EOF
+  } > coredns-after.Corefile
+  diff coredns-before.Corefile coredns-after.Corefile    # chỉ thêm đúng 5 dòng
+  kubectl -n kube-system patch configmap coredns --type merge \
+    -p "$(jq -n --rawfile c coredns-after.Corefile '{data:{Corefile:$c}}')"
+fi
+kubectl -n kube-system logs -l k8s-app=kube-dns -f --prefix | grep -i reload   # đợi cả 2 pod "Reloading complete"
+```
+
+Đo ngày 2026-11-14 (CoreDNS v1.14.6): từ lúc patch tới khi cả hai pod in `Reloading complete` mất khoảng 78 giây (kubelet đồng bộ ConfigMap vào pod rồi plugin `reload` mới thấy). Kiểm:
+
+```bash
+kubectl run -it --rm dns --image=busybox:stable --restart=Never -- sh -c '
+  nslookup auth.lab.internal                        # 10.20.0.200
+  nslookup kubernetes.default.svc.cluster.local     # 10.96.0.1: tên trong cụm vẫn chạy
+  nslookup github.com                               # IP công khai: tên ngoài vẫn qua block .:53
+  nslookup -type=AAAA auth.lab.internal             # không lỗi, không có địa chỉ (NODATA từ dnsmasq)'
 ```
 
 ### 8.8 CA của lab: root offline, tin root trên Mac
 
 Lab dùng CA nội bộ, không dùng chứng chỉ công khai ([ADR-0014](../../docs/adr/0014-lab-pki-and-dns.md)). Thông số và nguồn ở mục "PKI và cert-manager" của [cluster-entry.md](../../docs/standards/cluster-entry.md#pki-và-cert-manager).
 
-1. **Tạo root CA một lần, offline trên Mac**, bằng `openssl` theo script trong repo `platform` (viết ở G0; script không chứa khóa): hạn 10 năm, `CA:TRUE`, `keyCertSign, cRLSign`, **name constraints critical** chỉ cho `lab.internal`, `svc`, `svc.cluster.local`. Khóa root **không vào Git và không vào cụm**; cất ngoài máy (ổ mã hóa hoặc password manager, như bản backup khóa Sealed Secrets). Phần công khai `lab-root-ca.crt` để trong repo `platform`. Mất khóa root thì phải tạo root mới và tin lại ở mọi nơi.
+1. **Tạo root CA một lần, offline trên Mac**, bằng script `scripts/lab-ca/make-root.sh` của repo `platform` (script không chứa khóa): khóa EC P-384 mã hóa bằng passphrase, hạn 10 năm, `CA:TRUE`, `keyCertSign, cRLSign`, **name constraints critical** chỉ cho DNS `lab.internal`, `svc`, `svc.cluster.local` và **cấm mọi IP SAN** (IPv4, IPv6). Khóa root **không vào Git và không vào cụm**; cất ngoài máy (ổ mã hóa hoặc password manager, như bản backup khóa Sealed Secrets). Phần công khai `pki/lab-root-ca.crt` được commit vào repo `platform`. Mất khóa root thì phải tạo root mới và tin lại ở mọi nơi.
+
+   ```bash
+   cd platform
+   scripts/lab-ca/test-constraints.sh     # 18 PASS: hành vi script (chạy lại, ký lỗi, khóa trong repo) và root tạm → intermediate → leaf
+   scripts/lab-ca/make-root.sh            # hỏi passphrase; khóa ở ~/lab-ca/, chứng chỉ ở pki/lab-root-ca.crt
+   openssl x509 -in pki/lab-root-ca.crt -noout -ext nameConstraints   # Permitted 3 DNS, Excluded 2 IP
+   ```
+
+   - Script tự tìm OpenSSL 3/4 (Homebrew) và bỏ qua `/usr/bin/openssl`, vì đó là LibreSSL; từ chối chạy khi đã có khóa hoặc chứng chỉ, vì chạy lại là đổi root.
+   - **Vì sao cấm IP:** name constraints chỉ ràng buộc loại tên được liệt kê (RFC 5280 §4.2.1.10). Chỉ ghi DNS thì chứng chỉ mang IP SAN không bị ràng buộc gì, và ai lấy được khóa intermediate trong cụm vẫn ký được chứng chỉ cho một IP bất kỳ mà Mac tin. Lab truy cập HTTPS bằng tên, không cần IP SAN.
+   - `test-constraints.sh` dựng intermediate **không** có ràng buộc riêng (tình huống lộ khóa intermediate) và kiểm OpenSSL từ chối `evil.example.com`, `lab.internal.evil.com`, `evillab.internal`, leaf có thêm một tên ngoài, leaf có IP SAN. Đây mới là bằng chứng của OpenSSL; Chrome, Safari, `curl` kiểm ở ticket G0-06, JVM và Node ở G0-07.
 2. **Tạo intermediate CA** (hạn 2 năm, cũng có name constraints) ký bằng root, rồi seal thành Sealed Secret `lab-intermediate-ca` ở namespace `cert-manager` (`tls.crt` chứa intermediate rồi root, kèm `tls.key`) và commit vào `gitops`. App `platform` tạo `ClusterIssuer lab-ca` từ Secret này, cert-manager cấp chứng chỉ wildcard `*.lab.internal` cho Gateway `edge`. Dựng lại cụm không phải tạo lại root hay tin lại. Đặt lịch nhắc xoay intermediate trước khi hết hạn 60 ngày.
 3. **Tin root trên Mac** (Keychain hệ thống):
 
