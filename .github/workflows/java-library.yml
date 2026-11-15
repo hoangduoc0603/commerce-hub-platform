@@ -112,6 +112,24 @@ jobs:
       # Ghi package lên GitHub Packages bằng GITHUB_TOKEN.
       packages: write
     steps:
+      # Chỉ phát hành commit đã vào nhánh mặc định. Tag và version trên registry đều bất biến, nên tag gắn nhầm
+      # vào commit của nhánh khác sẽ thành một bản không gỡ được (review G0-18). API compare trả 'identical'
+      # (tag ở đầu nhánh) hoặc 'behind' (tag ở commit cũ hơn của nhánh) khi commit nằm trên nhánh mặc định;
+      # 'ahead' hay 'diverged' nghĩa là commit chưa vào nhánh đó. Không cần clone toàn bộ history.
+      - name: Kiểm commit của tag nằm trên nhánh mặc định
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SHA: ${{ github.sha }}
+        run: |
+          status="$(gh api "repos/${REPO}/compare/${DEFAULT_BRANCH}...${SHA}" --jq .status)"
+          case "$status" in
+            identical|behind) echo "Commit ${SHA} nằm trên ${DEFAULT_BRANCH} (${status})." ;;
+            *) echo "::error::Commit ${SHA} của tag chưa vào ${DEFAULT_BRANCH} (compare: ${status}); không publish."
+               exit 1 ;;
+          esac
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
