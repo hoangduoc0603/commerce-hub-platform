@@ -1,0 +1,133 @@
+# Reusable workflow cho thư viện Java của commerce-hub (libs/*): build và test mọi lần push/PR, gửi dependency
+# graph từ nhánh mặc định, publish lên GitHub Packages chỉ từ tag vX.Y.Z.
+# Chuẩn: docs/standards/ci-cd.md và docs/standards/java-library.md (repo docs).
+#
+# Bên gọi phải cấp cho job gọi workflow này (workflow được gọi chỉ hạ được quyền, không nâng được):
+#   permissions:
+#     contents: write   # job dependency-graph gửi dependency snapshot (chỉ chạy trên push vào nhánh mặc định)
+#     packages: write   # job publish (chỉ chạy trên push tag v*)
+# Không cần secret: publish dùng GITHUB_TOKEN của lần chạy.
+name: java-library
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: Phiên bản JDK Temurin cho setup-java. Khớp toolchain trong build của thư viện.
+        type: string
+        default: '25'
+      timeout-minutes:
+        description: Thời gian tối đa của mỗi job (phút). Mặc định của GitHub là 360 phút, quá dài cho một build hỏng.
+        type: number
+        default: 20
+
+# Mặc định cho mọi job: chỉ đọc mã nguồn. Job cần thêm quyền thì khai riêng.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    # Ghim bản image runner thay cho ubuntu-latest: nhãn latest đổi bản OS mà không báo trước.
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      # Ghim SHA 40 ký tự, comment là version để Dependabot cập nhật (ci-cd.md, "Chuỗi cung ứng của chính CI").
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Không để GITHUB_TOKEN lại trong .git/config: các bước sau không cần push.
+          persist-credentials: false
+
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      # Cache Gradle: mặc định chỉ ghi khi chạy trên nhánh mặc định (cache-read-only = true ở nhánh khác và ở
+      # tag), và kiểm checksum gradle-wrapper.jar (validate-wrappers = true).
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          # basic: cache mã nguồn mở của GitHub Actions. enhanced (mặc định v6) là thành phần độc quyền,
+          # phải chấp nhận điều khoản riêng (java-library.md, bảng lựa chọn).
+          cache-provider: basic
+
+      # Unit test, test TestKit của plugin và test Testcontainers (runner Ubuntu có sẵn Docker).
+      - name: Build và test
+        run: ./gradlew check
+
+      # Báo cáo JUnit XML khi job đỏ, để đọc lỗi mà không phải chạy lại.
+      - name: Upload báo cáo test
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: '**/build/test-results/**/*.xml'
+          if-no-files-found: ignore
+          retention-days: 7
+
+  dependency-graph:
+    name: dependency-graph
+    # Chỉ nhánh mặc định: dependency graph của repo phản ánh code đang ở main, Dependabot alerts đọc từ đây.
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      # Dependency submission API cần quyền ghi nội dung repo.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      # Gửi phụ thuộc Gradle lên dependency graph của GitHub để Dependabot tạo alert bảo mật cho thư viện
+      # (ci-cd.md, mục "Build, cache, test").
+      - uses: gradle/actions/dependency-submission@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-provider: basic
+          # Chỉ gửi lên GitHub, không upload file graph làm artifact.
+          dependency-graph: generate-and-submit
+
+  publish:
+    name: publish
+    # Chỉ khi check xanh, và chỉ trên push tag v*: nhánh và PR không bao giờ publish.
+    needs: check
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      # Ghi package lên GitHub Packages bằng GITHUB_TOKEN.
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-provider: basic
+
+      - name: Publish lên GitHub Packages
+        env:
+          # Gán tên tag qua env rồi dùng biến shell, không chèn ${{ }} thẳng vào run (chặn script injection).
+          TAG: ${{ github.ref_name }}
+          # Gradle đọc ORG_GRADLE_PROJECT_<tên> thành property <tên>: khớp credentials của repository
+          # 'githubPackages' trong plugin commercehub.kit-publishing.
+          ORG_GRADLE_PROJECT_githubPackagesUsername: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_githubPackagesPassword: ${{ secrets.GITHUB_TOKEN }}
+        # -Pversion đè version=0.0.0-local trong gradle.properties. Tag không phải vX.Y.Z thì build ném lỗi
+        # trước khi gửi request nào (lớp chặn trong commercehub.kit-publishing).
+        # Chỉ publish lên githubPackages, không publish lên repository thư mục testKit.
+        run: ./gradlew publishAllPublicationsToGithubPackagesRepository -Pversion="${TAG#v}"
