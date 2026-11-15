@@ -10,6 +10,13 @@ readonly RULESET_NAME="default-branch-minimal"
 # Hai rule duy nhất trên nhánh mặc định: chặn xóa và chặn force push (ADR-0006).
 readonly RULESET_RULES='[{"type":"deletion"},{"type":"non_fast_forward"}]'
 
+# Ruleset khóa tag phát hành (repo publish artifact từ tag: libs/*, contracts). Tag vX.Y.Z đã đẩy không dời
+# sang commit khác và không xóa được, nên version đã phát hành luôn trỏ đúng một commit
+# (docs/standards/java-library.md, mục "Version, publish, bất biến"). Tạo tag mới vẫn được.
+readonly TAG_RULESET_NAME="release-tags-immutable"
+readonly TAG_RULESET_PATTERN="refs/tags/v*"
+readonly TAG_RULESET_RULES='[{"type":"deletion"},{"type":"update"}]'
+
 # Rule không được có ở bất kỳ ruleset nào: ADR-0006 cố ý không bắt PR, không bắt status check.
 readonly FORBIDDEN_RULE_TYPES='["pull_request","required_status_checks","required_deployments","merge_queue"]'
 
@@ -79,10 +86,10 @@ api_jq() { # api_jq <path> <jq filter> <mặc định>
 
 # id ruleset theo tên, rỗng nếu chưa có. Lỗi API thì dừng hẳn (không coi là "chưa có",
 # vì như vậy bootstrap sẽ POST thêm một ruleset trùng tên).
-ruleset_id() { # ruleset_id <owner/name>
+ruleset_id() { # ruleset_id <owner/name> [tên ruleset, mặc định RULESET_NAME]
   local list
   list="$(gh api "repos/$1/rulesets")" || die "không đọc được rulesets của $1"
-  jq -r --arg n "$RULESET_NAME" 'first(.[] | select(.name == $n) | .id) // empty' <<<"$list"
+  jq -r --arg n "${2:-$RULESET_NAME}" 'first(.[] | select(.name == $n) | .id) // empty' <<<"$list"
 }
 
 # Ecosystem đang có trong một dependabot.yml, dạng "a,b".

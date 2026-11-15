@@ -3,26 +3,29 @@
 # cũng được: mỗi mục đọc trạng thái hiện tại, chỉ ghi khi lệch, cuối cùng in số thay đổi.
 #
 #   repo-bootstrap.sh <name|owner/name>   (name ngắn như "platform" thành "commerce-hub-platform") [--local <đường dẫn clone>] [--ecosystems gradle,docker,...]
-#                     [--description "..."] [--dry-run]
+#                     [--description "..."] [--release-tags] [--dry-run]
 #
-# --local:      cũng scaffold file trong bản clone (LICENSE MIT, khối .gitignore, .github/dependabot.yml)
-#               và gắn remote origin nếu thiếu. Script KHÔNG commit, KHÔNG push: chạy repo-audit.sh --local
-#               rồi tự commit/push.
-# --ecosystems: ecosystem Dependabot ngoài github-actions (luôn có), ví dụ gradle,docker hoặc helm.
-# --dry-run:    chỉ in sẽ đổi gì.
+# --local:        cũng scaffold file trong bản clone (LICENSE MIT, khối .gitignore, .github/dependabot.yml)
+#                 và gắn remote origin nếu thiếu. Script KHÔNG commit, KHÔNG push: chạy repo-audit.sh --local
+#                 rồi tự commit/push.
+# --ecosystems:   ecosystem Dependabot ngoài github-actions (luôn có), ví dụ gradle,docker hoặc helm.
+# --release-tags: repo publish artifact từ tag vX.Y.Z (libs/*, contracts): thêm ruleset khóa tag v*
+#                 (cấm dời và xóa tag). Không truyền thì không đụng tới ruleset này.
+# --dry-run:      chỉ in sẽ đổi gì.
 # Chuẩn: docs/standards/ci-cd.md, ADR-0006. Ticket: docs/.scratch/g0-platform/issues/01-repo-bootstrap-script.md
 
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
-REPO_ARG="" LOCAL="" ECOS="" DESC="" DRY_RUN=false
+REPO_ARG="" LOCAL="" ECOS="" DESC="" DRY_RUN=false RELEASE_TAGS=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local) LOCAL="${2:?}"; shift 2 ;;
     --ecosystems) ECOS="${2:?}"; shift 2 ;;
     --description) DESC="${2:?}"; shift 2 ;;
+    --release-tags) RELEASE_TAGS=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage ;;
     *) [[ -z "$REPO_ARG" ]] || usage; REPO_ARG="$1"; shift ;;
@@ -118,6 +121,29 @@ elif [[ "$(gh api "repos/$REPO/rulesets/$RS_ID" | normalize_rs)" == "$(normalize
   ok "ruleset $RULESET_NAME"
 else
   change "sửa ruleset $RULESET_NAME về đúng mẫu" gh api -X PUT "repos/$REPO/rulesets/$RS_ID" --input - <<<"$DESIRED_RS"
+fi
+
+# --- Ruleset khóa tag phát hành (--release-tags) -------------------------------
+# target tag, áp lên refs/tags/v*: rule update cấm dời tag sang commit khác, deletion cấm xóa. Không có
+# bypass, kể cả admin: muốn sửa bản đã phát hành thì ra bản vá (SemVer, mục 3).
+if $RELEASE_TAGS; then
+  DESIRED_TAG_RS="$(jq -nc --arg name "$TAG_RULESET_NAME" --arg pattern "$TAG_RULESET_PATTERN" \
+    --argjson rules "$TAG_RULESET_RULES" '{
+    name: $name, target: "tag", enforcement: "active",
+    conditions: {ref_name: {include: [$pattern], exclude: []}},
+    rules: $rules, bypass_actors: []
+  }')"
+  TAG_RS_ID=""
+  [[ -z "${META:-}" ]] || TAG_RS_ID="$(ruleset_id "$REPO" "$TAG_RULESET_NAME")"
+  if [[ -z "$TAG_RS_ID" ]]; then
+    change "tạo ruleset $TAG_RULESET_NAME (khóa tag v*: cấm dời, cấm xóa)" \
+      gh api -X POST "repos/$REPO/rulesets" --input - <<<"$DESIRED_TAG_RS"
+  elif [[ "$(gh api "repos/$REPO/rulesets/$TAG_RS_ID" | normalize_rs)" == "$(normalize_rs <<<"$DESIRED_TAG_RS")" ]]; then
+    ok "ruleset $TAG_RULESET_NAME"
+  else
+    change "sửa ruleset $TAG_RULESET_NAME về đúng mẫu" \
+      gh api -X PUT "repos/$REPO/rulesets/$TAG_RS_ID" --input - <<<"$DESIRED_TAG_RS"
+  fi
 fi
 
 # --- CodeQL default setup -----------------------------------------------------

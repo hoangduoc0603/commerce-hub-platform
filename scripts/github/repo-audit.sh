@@ -3,21 +3,24 @@
 # In PASS/FAIL theo từng tiêu chí; exit 1 nếu có FAIL.
 #
 #   repo-audit.sh <name|owner/name>   (name ngắn như "platform" thành "commerce-hub-platform") [--local <đường dẫn clone>] [--ecosystems gradle,docker,...]
+#                 [--release-tags]
 #
-# --local: kiểm thêm phần chỉ có ở bản clone: file scaffold, .gitignore, và email trong history.
-#          Chạy trước lần push đầu để chặn email thật lọt lên repo public.
+# --local:        kiểm thêm phần chỉ có ở bản clone: file scaffold, .gitignore, và email trong history.
+#                 Chạy trước lần push đầu để chặn email thật lọt lên repo public.
+# --release-tags: repo publish từ tag vX.Y.Z: kiểm thêm ruleset khóa tag v* (cấm dời, cấm xóa).
 # Chuẩn: docs/standards/ci-cd.md, ADR-0006. Ticket: docs/.scratch/g0-platform/issues/01-repo-bootstrap-script.md
 
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
-REPO_ARG="" LOCAL="" ECOS=""
+REPO_ARG="" LOCAL="" ECOS="" RELEASE_TAGS=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local) LOCAL="${2:?}"; shift 2 ;;
     --ecosystems) ECOS="${2:?}"; shift 2 ;;
+    --release-tags) RELEASE_TAGS=true; shift ;;
     -h|--help) usage ;;
     *) [[ -z "$REPO_ARG" ]] || usage; REPO_ARG="$1"; shift ;;
   esac
@@ -81,6 +84,22 @@ for id in $RS_IDS; do
   FORBIDDEN="$(printf '%s\n%s' "$FORBIDDEN" "$TYPES" | sed '/^$/d' | sort -u | paste -sd, -)"
 done
 check "không ruleset nào bắt PR/status check" "${FORBIDDEN:-none}" "none"
+
+# --- Tag phát hành (--release-tags) --------------------------------------------
+if $RELEASE_TAGS; then
+  TAG_RS_ID="$(ruleset_id "$REPO" "$TAG_RULESET_NAME")"
+  if [[ -z "$TAG_RS_ID" ]]; then
+    fail "ruleset '$TAG_RULESET_NAME'" "chưa có"
+  else
+    TRS="$(gh api "repos/$REPO/rulesets/$TAG_RS_ID")"
+    check "ruleset tag: enforcement" "$(jq -r .enforcement <<<"$TRS")" "active"
+    check "ruleset tag: target" "$(jq -r .target <<<"$TRS")" "tag"
+    check "ruleset tag: áp lên $TAG_RULESET_PATTERN" "$(jq -c '.conditions.ref_name.include' <<<"$TRS")" "[\"$TAG_RULESET_PATTERN\"]"
+    check "ruleset tag: cấm dời và xóa" "$(jq -c '[.rules[].type] | sort' <<<"$TRS")" '["deletion","update"]'
+    check "ruleset tag: không ai được bypass" "$(jq -c '.bypass_actors // []' <<<"$TRS")" '[]'
+  fi
+fi
+
 DEFAULT_BRANCH="$(jq -r .default_branch <<<"$META")"
 check "không dùng branch protection rule cũ" \
   "$(http_status "repos/$REPO/branches/$DEFAULT_BRANCH/protection")" "404"
