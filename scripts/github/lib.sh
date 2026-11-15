@@ -10,7 +10,7 @@ readonly RULESET_NAME="default-branch-minimal"
 # Hai rule duy nhất trên nhánh mặc định: chặn xóa và chặn force push (ADR-0006).
 readonly RULESET_RULES='[{"type":"deletion"},{"type":"non_fast_forward"}]'
 
-# Ruleset khóa tag phát hành (repo publish artifact từ tag: libs/*, contracts). Tag vX.Y.Z đã đẩy không dời
+# Ruleset khóa tag phát hành (repo publish artifact từ tag, ví dụ contracts). Tag vX.Y.Z đã đẩy không dời
 # sang commit khác và không xóa được, nên version đã phát hành luôn trỏ đúng một commit
 # (docs/standards/java-library.md, mục "Version, publish, bất biến"). Tạo tag mới vẫn được.
 readonly TAG_RULESET_NAME="release-tags-immutable"

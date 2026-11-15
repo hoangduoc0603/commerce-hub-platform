@@ -9,7 +9,7 @@
 #                 và gắn remote origin nếu thiếu. Script KHÔNG commit, KHÔNG push: chạy repo-audit.sh --local
 #                 rồi tự commit/push.
 # --ecosystems:   ecosystem Dependabot ngoài github-actions (luôn có), ví dụ gradle,docker hoặc helm.
-# --release-tags: repo publish artifact từ tag vX.Y.Z (libs/*, contracts): thêm ruleset khóa tag v*
+# --release-tags: repo publish artifact từ tag vX.Y.Z (ví dụ contracts): thêm ruleset khóa tag v*
 #                 (cấm dời và xóa tag). Không truyền thì không đụng tới ruleset này.
 # --dry-run:      chỉ in sẽ đổi gì.
 # Chuẩn: docs/standards/ci-cd.md, ADR-0006. Ticket: docs/.scratch/g0-platform/issues/01-repo-bootstrap-script.md
