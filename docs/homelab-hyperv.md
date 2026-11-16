@@ -22,7 +22,7 @@ Máy bàn: Windows 10 Pro + Hyper-V
   │
   ├─ vSwitch "LabNAT" (Internal + WinNAT)  ── mạng riêng 10.20.0.0/24, gateway 10.20.0.1 = Windows
   │     │
-  │     ├─ gw       10.20.0.5   Tailscale subnet router + registry image (cổng 5000)
+  │     ├─ gw       10.20.0.5   Tailscale subnet router
   │     │                       + dnsmasq cho lab.internal (cổng 53) + Mailpit (SMTP 1025, UI 8025)
   │     ├─ k8s-cp   10.20.0.10  control plane (etcd, apiserver, scheduler, controller-manager) + nhận pod
   │     ├─ k8s-w1   10.20.0.11  worker
@@ -46,7 +46,7 @@ Mạng trong cụm: pod 10.244.0.0/16 (Calico), service 10.96.0.0/12 (mặc đ�
 | **kubeadm** (Kubernetes gốc), không dùng k3s | Mục tiêu là học và đi phỏng vấn: thấy rõ từng thành phần control plane (static pod), tự backup etcd, tự chọn CNI, tự nâng cấp cụm và xoay vòng certificate. Đây cũng là cách bài thi CKA dựng cụm. Đổi lại tốn thêm khoảng 1–2 GB RAM và nửa ngày dựng |
 | **Calico** làm CNI | Phổ biến, có NetworkPolicy, nhẹ hơn Cilium, hợp với cụm đang sát RAM. Cilium để dành khi nâng máy lên 64 GB |
 | **Hạ tầng dữ liệu chạy trong cụm bằng operator** (Strimzi, CloudNativePG), không có VM `data` riêng | Kafka chạy đủ 3 broker trên 3 node (replication factor 3), Postgres có primary và replica tự failover. Học được StatefulSet, PersistentVolume, anti-affinity, PodDisruptionBudget. Đổi lại: ổ đĩa gắn với node (`local-path`), làm hỏng cụm là mất luôn dữ liệu, drain node phải tính tới tầng dữ liệu |
-| **Registry image trên `gw`**, ngoài cụm | Cụm hỏng vẫn kéo được image để dựng lại. Registry rất nhẹ nên ghép vào `gw` thay vì tạo thêm VM |
+| **Image và chart trên GHCR** (`ghcr.io`), không có registry trong lab (từ 2026-11-16, ADR-0017 trong repo `docs`) | CI push bằng `GITHUB_TOKEN`, không phải vào tailnet; package public nên node kéo không cần credential. Đổi lại: mất internet thì không kéo được image mới (pod đang chạy vẫn chạy). Trước đó dùng registry HTTP `10.20.0.5:5000` trên `gw` (mục 6) |
 | **Control plane cũng nhận pod** | Chỉ có 3 node, nên gỡ taint mặc định của kubeadm để Kafka/Postgres trải đều cả 3 node. Production thật không làm vậy |
 
 ### Chia tài nguyên (32 GB RAM, 20 luồng)
@@ -54,7 +54,7 @@ Mạng trong cụm: pod 10.244.0.0/16 (Calico), service 10.96.0.0/12 (mặc đ�
 | VM | vCPU | RAM | Ổ ảo (dynamic, tối đa) | Vai trò |
 |---|---|---|---|---|
 | Windows (host) | — | ~6 GB | — | Hệ điều hành, ứng dụng hằng ngày |
-| gw | 1 | 2 GB | 100 GB | Tailscale subnet router, registry image, dnsmasq (`lab.internal`), Mailpit |
+| gw | 1 | 2 GB | 100 GB | Tailscale subnet router, dnsmasq (`lab.internal`), Mailpit |
 | k8s-cp | 4 | 8 GB | 100 GB | Control plane + workload |
 | k8s-w1 | 6 | 8 GB | 100 GB | Worker |
 | k8s-w2 | 6 | 8 GB | 100 GB | Worker |
@@ -516,62 +516,23 @@ Host k8s-w2
 
 ---
 
-## 6. Registry image trên `gw`
+## 6. Image ở GHCR, không có registry trong lab
 
-Cụm chạy kiến trúc **amd64**, còn Mac M1 là **arm64**. Image build trên Mac phải nhắm `linux/amd64` (mục 9). Registry nằm trong lab để đẩy image lên nhanh, không phụ thuộc Docker Hub, và **nằm ngoài cụm** để cụm hỏng vẫn kéo được image về dựng lại.
+Từ 2026-11-16, image và chart nằm trên GitHub Container Registry (`ghcr.io/hoangduoc0603/…`), theo ADR-0017 trong repo `docs`. CI push bằng `GITHUB_TOKEN` qua reusable workflow `container-image.yml` của repo này (xem README). Package tạo từ workflow của repo public tự public, nên node kéo image qua HTTPS mà không cần pull secret hay cấu hình gì trong `/etc/containerd/certs.d` (đã kiểm ở ticket G0-17). Đổi lại: cụm phải ra được internet để kéo image mới.
 
-Trên `gw` dùng gói `docker-registry` của Debian (phần mềm registry chính thức, chạy như một dịch vụ systemd), **không cài Docker**. Lý do: khi Docker bật chuyển tiếp gói tin, nó đặt policy của chain `FORWARD` thành `DROP`. Tài liệu Docker có ghi điều này, và nó dễ làm hỏng chức năng subnet router của Tailscale trên chính máy này.
+Cụm chạy kiến trúc **amd64**, còn Mac M1 là **arm64**: image cho cụm do CI build trên runner amd64; build trên Mac thì phải nhắm `linux/amd64` (mục 9).
 
-**Gói này không có trong kho chính của Debian 12**, chỉ có trong **bookworm-backports** (bản 2.8.2). Thêm kho backports rồi cài:
+**`gw` không cài Docker.** Khi Docker bật chuyển tiếp gói tin, nó đặt policy của chain `FORWARD` thành `DROP`. Tài liệu Docker có ghi điều này, và nó dễ làm hỏng chức năng subnet router của Tailscale trên chính máy này. Dịch vụ phụ trên `gw` (dnsmasq, Mailpit, RustFS) chạy bằng systemd.
 
-```bash
-ssh gw
-grep -rq bookworm-backports /etc/apt/sources.list /etc/apt/sources.list.d/ \
-  || echo 'deb http://deb.debian.org/debian bookworm-backports main' | sudo tee /etc/apt/sources.list.d/backports.list
-sudo apt update
-sudo apt install -y -t bookworm-backports docker-registry
-```
-
-**Thay file cấu hình mặc định.** File gói cài sẵn lấy từ file mẫu của dự án, trong đó bật xác thực `htpasswd` trỏ vào một thư mục chứ không phải file mật khẩu. Ghi đè bằng cấu hình gọn, không xác thực:
+**Registry cũ đã tắt.** Trước 2026-11-16, `gw` chạy registry HTTP `10.20.0.5:5000` (gói `docker-registry` 2.8 từ bookworm-backports, không xác thực, không TLS), và mỗi node có `/etc/containerd/certs.d/10.20.0.5:5000/hosts.toml` khai báo `http://`. Hướng dẫn cài cũ nằm trong lịch sử git của file này. Lab dựng mới thì bỏ qua đoạn dưới; lab dựng trước ngày đó thì tắt bằng:
 
 ```bash
-sudo cp /etc/docker/registry/config.yml /etc/docker/registry/config.yml.orig
-sudo tee /etc/docker/registry/config.yml >/dev/null <<'EOF'
-version: 0.1
-log:
-  fields:
-    service: registry
-storage:
-  cache:
-    blobdescriptor: inmemory
-  filesystem:
-    rootdirectory: /var/lib/docker-registry
-  delete:
-    enabled: true          # cho phép xóa image (để dọn dung lượng)
-http:
-  addr: :5000
-  headers:
-    X-Content-Type-Options: [nosniff]
-health:
-  storagedriver:
-    enabled: true
-    interval: 10s
-    threshold: 3
-EOF
-sudo systemctl enable docker-registry
-sudo systemctl restart docker-registry
-
-systemctl is-active docker-registry              # active
-ss -ltn | grep ':5000'                           # LISTEN ... *:5000
-curl -s http://localhost:5000/v2/_catalog        # {"repositories":[]}
+ssh gw 'sudo systemctl disable --now docker-registry'
+for h in k8s-cp k8s-w1 k8s-w2; do ssh "$h" "sudo rm -r '/etc/containerd/certs.d/10.20.0.5:5000'"; done
+curl -s -m 5 http://10.20.0.5:5000/v2/; echo "exit=$?"   # exit=7: không còn gì nghe ở cổng 5000
 ```
 
-Kiểm tra từ Mac: `curl -s http://10.20.0.5:5000/v2/_catalog` cũng phải trả `{"repositories":[]}`.
-
-- **Không có xác thực, không có TLS.** Chấp nhận được vì registry chỉ truy cập được từ mạng lab và từ tailnet của bạn. Đừng bao giờ mở cổng này ra internet.
-- Image lưu ở `/var/lib/docker-registry` trên ổ của `gw`.
-- Dọn image đã xóa để lấy lại dung lượng: `sudo -u docker-registry docker-registry garbage-collect /etc/docker/registry/config.yml`.
-- Gói này là registry bản 2.8. Muốn bản 3.x thì chạy image `registry:3` bằng Docker hoặc Podman trên một VM khác, không chạy trên `gw`.
+Gỡ `hosts.toml` không cần restart containerd ([hosts.md của containerd v2.4.2](https://github.com/containerd/containerd/blob/v2.4.2/docs/hosts.md): "Updates under this directory do not require restarting the containerd daemon"). Gói và dữ liệu cũ (`/var/lib/docker-registry`) vẫn còn trên `gw`; gỡ hẳn bằng `sudo apt purge docker-registry` khi chắc không cần.
 
 ---
 
@@ -581,14 +542,13 @@ Phiên bản được tra vào 11/2026: **Kubernetes 1.37** (bản stable là v1
 
 ### 7.1 Chuẩn bị cả 3 node
 
-Chạy từ Mac. Script cài và cấu hình mọi thứ một node cần trước `kubeadm`: module kernel, sysctl, containerd, cấu hình registry nội bộ, `kubelet`/`kubeadm`/`kubectl`.
+Chạy từ Mac. Script cài và cấu hình mọi thứ một node cần trước `kubeadm`: module kernel, sysctl, containerd, `kubelet`/`kubeadm`/`kubectl`.
 
 ```bash
 cat > /tmp/node-prep.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 K8S_MINOR=v1.37
-REGISTRY=10.20.0.5:5000
 
 # 1. Kernel module và sysctl. Tài liệu Kubernetes hiện chỉ bắt buộc ip_forward;
 #    overlay/br_netfilter và bridge-nf-call-* thêm vào cho chắc (containerd và nhiều CNI dùng tới)
@@ -621,6 +581,7 @@ apt-get install -y containerd.io
 
 # 3. Cấu hình containerd. File do gói containerd.io cài sẵn tắt plugin CRI, nên
 #    sinh lại file mặc định; bật cgroup systemd; trỏ cấu hình registry về /etc/containerd/certs.d
+#    (hiện để trống: image kéo từ registry công khai qua HTTPS; thư mục này dành cho mirror hay CA riêng sau này)
 containerd config default > /etc/containerd/config.toml
 sed -i -e 's/SystemdCgroup = false/SystemdCgroup = true/' \
        -e "s#^\(\s*config_path = \)''#\1'/etc/containerd/certs.d'#" /etc/containerd/config.toml
@@ -628,16 +589,6 @@ grep -q 'SystemdCgroup = true' /etc/containerd/config.toml \
   || { echo 'LOI: chua bat SystemdCgroup, sua tay /etc/containerd/config.toml'; exit 1; }
 grep -q "config_path = '.*/etc/containerd/certs.d" /etc/containerd/config.toml \
   || { echo 'LOI: config_path chua tro ve /etc/containerd/certs.d'; exit 1; }
-
-# Registry nội bộ không có TLS: khai báo http://
-mkdir -p "/etc/containerd/certs.d/$REGISTRY"
-cat > "/etc/containerd/certs.d/$REGISTRY/hosts.toml" <<H
-server = "http://$REGISTRY"
-
-[host."http://$REGISTRY"]
-  capabilities = ["pull", "resolve", "push"]
-  skip_verify = true
-H
 systemctl restart containerd
 
 # 4. kubelet, kubeadm, kubectl từ kho chính thức pkgs.k8s.io
@@ -1077,7 +1028,7 @@ Keycloak gửi email xác minh và quên mật khẩu tới **Mailpit v1.33.1** 
 
 - Realm của Keycloak (trong `gitops`) đặt SMTP `10.20.0.5:1025`. Mac và runner CI đọc thư ở `http://10.20.0.5:8025`, không qua Gateway.
 - SMTP không TLS, UI không xác thực: chấp nhận vì chỉ tới được trong lab và tailnet.
-- `gw` chỉ có 2 GB mà đang chạy Tailscale, registry, dnsmasq, Mailpit (và RustFS từ mục 12.1): đo RAM thật ở G0.
+- `gw` chỉ có 2 GB mà đang chạy Tailscale, dnsmasq, Mailpit (và RustFS từ mục 12.1): đo RAM thật ở G0. Registry đã tắt (mục 6).
 
 ```bash
 systemctl show mailpit -p MemoryCurrent                 # trên gw: < 128 MiB
@@ -1086,42 +1037,25 @@ curl -s http://10.20.0.5:8025/api/v1/messages | head    # từ Mac
 
 ---
 
-## 9. Build image trên Mac và chạy trên cụm
+## 9. Image từ CI tới cụm
 
-**1. Cho Docker Desktop trên Mac đẩy image lên registry không TLS.** Vào Settings → Docker Engine, thêm vào JSON rồi Apply & Restart:
+Image chạy trên cụm do CI build và push lên GHCR (mục 6), không push từ Mac: push vào `main` của repo service thì reusable workflow `container-image.yml` build cho `linux/amd64`, tag bằng git SHA và trả về digest. Cụm chạy image theo digest đó.
 
-```json
-"insecure-registries": ["10.20.0.5:5000"]
-```
-
-**2. Build cho amd64.** Thiếu bước này thì pod báo `exec format error`.
+**1. Build thử trên Mac cho amd64.** Thiếu `--platform` thì image là arm64 và pod báo `exec format error`. Trên Apple Silicon, build amd64 chạy qua giả lập nên chậm hơn.
 
 ```bash
-# Dockerfile thường
-docker buildx build --platform linux/amd64 -t 10.20.0.5:5000/hello-app:0.1 --push .
-curl -s http://10.20.0.5:5000/v2/_catalog       # {"repositories":["hello-app"]}
+docker buildx build --platform linux/amd64 -t hello:local --load .
 ```
 
-Với Spring Boot `bootBuildImage` (Gradle), đặt platform và registry trong `build.gradle`:
-
-```groovy
-tasks.named('bootBuildImage') {
-    imagePlatform = 'linux/amd64'
-    imageName = "10.20.0.5:5000/${project.name}:${version}"
-    publish = true
-}
-```
-
-Trên Apple Silicon, build image amd64 chạy qua giả lập nên chậm hơn. Khi dự án lớn dần, có thể chạy runner CI ngay trong cụm (amd64 sẵn) để build.
-
-**3. Kiểm tra trên cụm:**
+**2. Kiểm tra cụm kéo được một image trên GHCR**, không cần credential (ví dụ image thử của repo này):
 
 ```bash
-kubectl run test --image=10.20.0.5:5000/hello-app:0.1 --restart=Never
-kubectl get pod test; kubectl delete pod test
+kubectl run test --restart=Never --image=ghcr.io/hoangduoc0603/commerce-hub-platform-smoke@sha256:<digest>
+kubectl get events --field-selector involvedObject.name=test   # phải có Pulled
+kubectl delete pod test
 ```
 
-Pod kéo được image là nhờ file `/etc/containerd/certs.d/10.20.0.5:5000/hosts.toml` trên mỗi node (mục 7.1).
+Image thử `FROM scratch` không có lệnh để chạy, nên sau `Pulled` pod báo `CreateContainerError`; với image service thật thì pod lên `Running`. Digest lấy từ summary của run `ghcr-smoke` hoặc `docker buildx imagetools inspect ghcr.io/…:<git SHA>`.
 
 ---
 
@@ -1130,7 +1064,7 @@ Pod kéo được image là nhờ file `/etc/containerd/certs.d/10.20.0.5:5000/h
 ### 10.1 Theo dõi tài nguyên
 
 - Windows: Task Manager → Performance; Hyper-V Manager cho biết RAM và CPU của từng VM.
-- **Dung lượng SSD:** `Get-PSDrive D` và `Get-ChildItem D:\Study\lab\HyperV -Recurse -Filter *.vhdx | Measure-Object Length -Sum`. Còn dưới 50 GB trống thì dọn image cũ (`sudo crictl rmi --prune` trên từng node, xóa image cũ trên registry ở `gw`) hoặc thêm SSD.
+- **Dung lượng SSD:** `Get-PSDrive D` và `Get-ChildItem D:\Study\lab\HyperV -Recurse -Filter *.vhdx | Measure-Object Length -Sum`. Còn dưới 50 GB trống thì dọn image cũ (`sudo crictl rmi --prune` trên từng node) hoặc thêm SSD.
 - Trong cụm: `kubectl top nodes`, `kubectl top pods -A` (nhờ metrics-server ở mục 8.3), `k9s --context homelab`.
 
 ### 10.2 Cập nhật Windows hằng tháng (chủ động)
@@ -1214,8 +1148,8 @@ Tắt hẳn một worker (`Stop-VM k8s-w2 -TurnOff`) chính là cách giả lậ
 | Mac không phân giải `*.lab.internal` | Chưa có split DNS, Tailscale trên Mac không dùng DNS của Tailscale, hoặc dnsmasq trên `gw` không chạy | `dig @10.20.0.5 app.lab.internal +short`; trên gw: `systemctl status dnsmasq`; làm lại mục 8.7 bước 1–2 |
 | Pod không phân giải `*.lab.internal` | Thiếu server block trong CoreDNS, thường sau `kubeadm upgrade` | `kubectl -n kube-system get configmap coredns -o yaml`; làm lại mục 8.7 bước 3 |
 | Trình duyệt cảnh báo chứng chỉ ở `*.lab.internal` | Mac chưa tin root, hoặc Gateway `edge` chưa có chứng chỉ | Làm lại mục 8.8 bước 3; `kubectl -n edge get certificate` phải `Ready` |
-| Pod `ImagePullBackOff` với image `10.20.0.5:5000/...` | Thiếu `hosts.toml` hoặc `config_path`, hoặc chưa restart containerd | Trên node: `cat /etc/containerd/certs.d/10.20.0.5:5000/hosts.toml`, `grep config_path /etc/containerd/config.toml`, `sudo systemctl restart containerd`; thử `sudo crictl pull 10.20.0.5:5000/<image>` |
-| Mac không đẩy được image lên registry | Thiếu `insecure-registries` trong Docker Desktop, hoặc registry trên `gw` không chạy | Mục 9 bước 1; trên gw: `systemctl status docker-registry` |
+| Pod `ImagePullBackOff` với image `ghcr.io/...` | Package chưa public, sai digest hoặc tên (GHCR chỉ nhận chữ thường), hoặc node không ra được internet | Trên node: `sudo crictl pull ghcr.io/<owner>/<image>@sha256:<digest>` xem lỗi; `unauthorized` hoặc `denied` thì kiểm visibility của package (README của repo này, mục Reusable workflow); lỗi DNS hay timeout thì xem dòng "VM không ra internet" |
+| Pod `ImagePullBackOff` với image `10.20.0.5:5000/...` | Registry cũ trên `gw` đã tắt (mục 6) | Đổi tham chiếu sang image trên GHCR |
 | Pod chạy lỗi `exec format error` | Image arm64 build trên Mac | Build lại với `--platform linux/amd64` |
 | Giờ trong VM lệch | Máy từng ngủ, hoặc chrony chưa dùng PTP | `chronyc sources` phải có dòng `PHC0`; tắt sleep trên Windows |
 | Node `NotReady` sau khi Windows khởi động lại | Worker lên trước control plane | Đợi vài phút; kiểm tra `AutomaticStartDelay` |
