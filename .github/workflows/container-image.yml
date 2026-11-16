@@ -1,12 +1,18 @@
-# Reusable workflow: build một Dockerfile bằng Buildx cho linux/amd64 và push lên GHCR với tag = git SHA đầy đủ.
-# Chỉ push khi có push vào nhánh mặc định của bên gọi; mọi sự kiện khác (PR, nhánh khác, workflow_dispatch) chỉ build.
-# Chuẩn: docs/standards/ci-cd.md (repo docs), mục "Reusable workflow", "Quyền và credential"; ADR-0017.
+# Reusable workflow: build một Dockerfile bằng Buildx cho linux/amd64, quét bằng Trivy, rồi mới push lên GHCR với
+# tag = git SHA đầy đủ. Chỉ push khi có push vào nhánh mặc định của bên gọi; mọi sự kiện khác (PR, nhánh khác,
+# schedule, workflow_dispatch) chỉ build và quét.
+# Chuẩn: docs/standards/ci-cd.md và docs/standards/container-image.md (repo docs); ADR-0017.
+# Quyết định thiết kế: ticket G0-23 mục "Quyết định cho bước CI" (Q7–Q11) trong repo docs.
 #
 # Bên gọi phải cấp cho job gọi workflow này (workflow được gọi chỉ hạ được quyền, không nâng được):
 #   permissions:
-#     contents: read    # checkout
-#     packages: write   # chỉ job publish dùng; job build tự hạ về contents: read
+#     contents: read          # checkout
+#     packages: write         # chỉ job publish dùng
+#     security-events: write  # đẩy báo cáo Trivy (SARIF) lên Code scanning
 # Không cần secret: push bằng GITHUB_TOKEN của lần chạy.
+#
+# Hai job build và publish lặp phần lớn bước (permissions không đặt theo điều kiện được nên phải là hai job).
+# Sửa một bên thì sửa cả bên kia.
 name: container-image
 
 on:
@@ -22,14 +28,24 @@ on:
         description: Thư mục build context, tính từ gốc repo của bên gọi. Dockerfile nằm ở <context>/Dockerfile.
         type: string
         default: .
+      artifact:
+        # Dùng cho service Java: job check của java-service.yml build jar rồi upload artifact; Dockerfile chỉ COPY
+        # jar (container-image.md: không biên dịch trong docker build). Job ở đây checkout lại từ đầu nên phải tải.
+        description: Tên artifact của cùng lần chạy cần tải trước khi build. Rỗng thì không tải.
+        type: string
+        default: ''
+      artifact-path:
+        description: Thư mục (tính từ gốc repo) để giải nén artifact, ví dụ build/libs.
+        type: string
+        default: .
       timeout-minutes:
         # Mặc định của GitHub cho mỗi job là 360 phút (chưa xác minh, ci-cd.md): quá dài cho một build hỏng.
         description: Thời gian tối đa của mỗi job (phút).
         type: number
-        default: 15
+        default: 20
     outputs:
       # Ánh xạ output của job thành output của workflow; bên gọi đọc bằng needs.<job gọi>.outputs.digest.
-      # Ticket G0-23 dùng digest này để ghi vào gitops (deploy theo digest, không theo tag).
+      # Ticket G0-24 dùng digest này để ghi vào gitops (deploy theo digest, không theo tag).
       image:
         description: Tên đầy đủ ghcr.io/<owner>/<image>, không kèm tag. Rỗng nếu không push.
         value: ${{ jobs.publish.outputs.image }}
@@ -40,6 +56,11 @@ on:
 # Mặc định cho mọi job: chỉ đọc mã nguồn. Khai một scope thì các scope còn lại thành none.
 permissions:
   contents: read
+
+env:
+  # Trivy chạy bằng image ghim digest (image index đa kiến trúc), không dùng aquasecurity/trivy-action: tháng 3/2026
+  # tag của action đó bị dời sang commit độc hại (ci-cd.md, GHSA-69fq-xp46-6x23). Cùng bản với quét local (G0-23 Q2).
+  TRIVY_IMAGE: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
 
 jobs:
   build:
@@ -53,52 +74,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      # Hạ xuống chỉ đọc dù bên gọi cấp packages: write: job chạy cho PR không bao giờ ghi được package.
+      # Không có packages: write dù bên gọi cấp: job chạy cho PR không bao giờ ghi được package.
       contents: read
-    steps:
-      # Ghim SHA 40 ký tự lấy từ repo gốc, comment là version để Dependabot cập nhật.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Không để GITHUB_TOKEN lại trong .git/config: không bước nào cần git push.
-          persist-credentials: false
-
-      # Builder docker-container (mặc định của action) để có đủ tính năng BuildKit, giống build trên Mac.
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: ${{ inputs.context }}
-          # Cụm chạy amd64 (docs/homelab-hyperv.md); runner ubuntu-24.04 cũng là amd64 nên không cần QEMU.
-          platforms: linux/amd64
-          # Luôn kéo lại base image theo digest đã ghim, không dùng bản cache cũ trên builder.
-          pull: true
-          push: false
-          # Action mặc định đính attestation provenance vào image, khiến registry nhận một image index thay vì
-          # một manifest. Attestation hoãn tới G7 (ci-cd.md, "Image, SBOM, provenance"), nên tắt cả hai.
-          provenance: false
-          sbom: false
-
-  publish:
-    name: publish
-    # Chỉ push vào nhánh mặc định: PR (kể cả từ fork), nhánh khác và workflow_dispatch không bao giờ push.
-    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
-      # Ghi package lên GHCR bằng GITHUB_TOKEN. Token này hết hạn khi job xong, không có secret dài hạn nào.
-      packages: write
-    outputs:
-      image: ${{ steps.name.outputs.image }}
-      digest: ${{ steps.push.outputs.digest }}
-    # Các bước checkout, setup-buildx và các khóa with chung của build-push-action (context, platforms, pull,
-    # provenance, sbom) lặp lại job build: permissions không đặt theo điều kiện được nên phải là hai job.
-    # Sửa một bên thì sửa cả bên kia.
+      security-events: write
     steps:
       # Tên trên GHCR phải là chữ thường, mà owner trên GitHub có thể có chữ hoa. Expression của Actions không có
       # hàm lowercase, nên đổi bằng ${VAR,,} của bash. Input đi qua env rồi mới vào shell, không chèn ${{ }}
       # thẳng vào run (chặn script injection, ci-cd.md "Quyền và credential").
-      - name: Tính tên image
+      # created: giờ build theo RFC 3339 cho nhãn OCI; tính một lần để mọi lần build trong job dùng cùng giá trị.
+      - name: Tính tên image và giờ build
         id: name
         env:
           IMAGE: ${{ inputs.image }}
@@ -108,10 +92,121 @@ jobs:
             exit 1
           fi
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Ghim SHA 40 ký tự lấy từ repo gốc, comment là version để Dependabot cập nhật.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Không để GITHUB_TOKEN lại trong .git/config: không bước nào cần git push.
+          persist-credentials: false
+
+      - if: inputs.artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ inputs.artifact-path }}
+
+      # Builder docker-container (mặc định của action) để có đủ tính năng BuildKit và cache type=gha.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Build rồi nạp vào Docker của runner để quét (mẫu "Test before push" của Docker). Job này không push.
+      - id: load
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          # Cụm chạy amd64 (docs/homelab-hyperv.md); runner ubuntu-24.04 cũng là amd64 nên không cần QEMU.
+          platforms: linux/amd64
+          # Luôn kéo lại base image theo digest đã ghim, không dùng bản cũ trên builder.
+          pull: true
+          load: true
+          # Action mặc định đính attestation provenance, khiến registry nhận image index thay vì một manifest.
+          # Attestation và SBOM hoãn tới G7 (ci-cd.md, "Image, SBOM, provenance"), nên tắt cả hai.
+          provenance: false
+          sbom: false
+          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
+          # Nhãn mà chỉ CI biết giá trị (G0-23 Q8); nhãn tĩnh (title, base.*) nằm trong Dockerfile. Nhãn gắn lúc
+          # xuất image, không nằm trong cache key của bước nào, nên created đổi mỗi lần build không làm mất cache.
+          # source: nối package với repo một cách tường minh, không phụ thuộc vào cách push.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.name.outputs.created }}
+          # Chỉ đọc cache BuildKit trong GitHub Actions cache (G0-23 Q9). Job PR không ghi: cache của nhánh PR không
+          # dùng lại được ở main, chỉ tốn hạn mức 10 GB của repo. Scope theo image để nhiều image không đè nhau.
+          cache-from: type=gha,scope=${{ inputs.image }}
+
+      # Quét file tar của image, giống quét local (G0-23 Q2): không mount docker.sock vào container Trivy.
+      # Lần 1: báo cáo SARIF đủ mọi mức (kể cả chưa có bản vá) cho Code scanning, không chặn.
+      # Lần 2: cổng chặn HIGH/CRITICAL đã có bản vá (container-image.md). Lần 2 dùng lại DB lần 1 vừa tải.
+      # Ngoại lệ ghi trong <context>/.trivyignore kèm lý do và hạn (container-image.md).
+      - name: Trivy
+        id: trivy
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          CONTEXT: ${{ inputs.context }}
+        run: |
+          scan="${RUNNER_TEMP}/scan"
+          mkdir -p "$scan" "${RUNNER_TEMP}/trivy-cache"
+          docker save "${IMAGE}:${GITHUB_SHA}" -o "${scan}/image.tar"
+          ignore=()
+          if [[ -f "${CONTEXT}/.trivyignore" ]]; then
+            cp "${CONTEXT}/.trivyignore" "${scan}/.trivyignore"
+            ignore=(--ignorefile /scan/.trivyignore)
+          fi
+          trivy() {
+            docker run --rm -v "${scan}:/scan" -v "${RUNNER_TEMP}/trivy-cache:/cache" "$TRIVY_IMAGE" \
+              image --cache-dir /cache --input /scan/image.tar "${ignore[@]}" "$@"
+          }
+          trivy --format sarif --output /scan/trivy.sarif
+          echo "sarif=${scan}/trivy.sarif" >> "$GITHUB_OUTPUT"
+          trivy --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+
+      # Đẩy báo cáo cả khi cổng chặn đỏ, để xem CVE trong tab Security. Bỏ qua PR từ fork: token của nó chỉ đọc.
+      - if: >-
+          !cancelled() && steps.trivy.outputs.sarif != '' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ steps.trivy.outputs.sarif }}
+          category: trivy-image-${{ inputs.image }}
+
+  publish:
+    name: publish
+    # Chỉ push vào nhánh mặc định: PR (kể cả từ fork), nhánh khác, schedule và workflow_dispatch không bao giờ push.
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      # Ghi package lên GHCR bằng GITHUB_TOKEN. Token này hết hạn khi job xong, không có secret dài hạn nào.
+      packages: write
+      security-events: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Tính tên image và giờ build
+        id: name
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          if [[ ! "$IMAGE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "::error::Tên image '${IMAGE}' không hợp lệ: chỉ chữ thường, số và . _ - ở giữa."
+            exit 1
+          fi
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - if: inputs.artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ inputs.artifact-path }}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -124,9 +219,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Tag = SHA chỉ được trỏ vào một digest (ci-cd.md, "Lệch chuẩn có chủ đích ở home lab": CI kiểm tag chưa
-      # tồn tại trước khi push). Re-run một lần chạy push sẽ build lại, BuildKit thường cho digest khác, và đẩy đè
-      # tag mà gitops có thể đang trỏ theo. Chỉ fail khi inspect THÀNH CÔNG (tag đã có): package chưa từng tồn tại
-      # trả lỗi khác "not found" (thử 2026-11-16, ẩn danh: 403), mà lần push đầu của package mới phải đi qua.
+      # tồn tại trước khi push). Re-run một lần chạy push sẽ build lại, có thể cho digest khác, và đẩy đè tag mà
+      # gitops có thể đang trỏ theo. Chỉ fail khi inspect THÀNH CÔNG (tag đã có): package chưa từng tồn tại trả
+      # lỗi khác "not found" (thử 2026-11-16, ẩn danh: 403), mà lần push đầu của package mới phải đi qua.
       - name: Kiểm tag chưa tồn tại
         env:
           IMAGE: ${{ steps.name.outputs.image }}
@@ -138,6 +233,58 @@ jobs:
           fi
           echo "Chưa có ${IMAGE}:${GITHUB_SHA}: ${out}"
 
+      # Lần build duy nhất thật sự chạy các bước Dockerfile; nạp vào Docker để quét trước khi push.
+      - id: load
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          platforms: linux/amd64
+          pull: true
+          load: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.name.outputs.created }}
+          cache-from: type=gha,scope=${{ inputs.image }}
+          # Chỉ nhánh mặc định ghi cache. mode=max: ghi cả layer của stage extract, để lần sau stage đó cũng trúng
+          # cache (mode=min chỉ ghi layer của image cuối).
+          cache-to: type=gha,scope=${{ inputs.image }},mode=max
+
+      - name: Trivy
+        id: trivy
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          CONTEXT: ${{ inputs.context }}
+        run: |
+          scan="${RUNNER_TEMP}/scan"
+          mkdir -p "$scan" "${RUNNER_TEMP}/trivy-cache"
+          docker save "${IMAGE}:${GITHUB_SHA}" -o "${scan}/image.tar"
+          ignore=()
+          if [[ -f "${CONTEXT}/.trivyignore" ]]; then
+            cp "${CONTEXT}/.trivyignore" "${scan}/.trivyignore"
+            ignore=(--ignorefile /scan/.trivyignore)
+          fi
+          trivy() {
+            docker run --rm -v "${scan}:/scan" -v "${RUNNER_TEMP}/trivy-cache:/cache" "$TRIVY_IMAGE" \
+              image --cache-dir /cache --input /scan/image.tar "${ignore[@]}" "$@"
+          }
+          trivy --format sarif --output /scan/trivy.sarif
+          echo "sarif=${scan}/trivy.sarif" >> "$GITHUB_OUTPUT"
+          trivy --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+
+      - if: ${{ !cancelled() && steps.trivy.outputs.sarif != '' }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ steps.trivy.outputs.sarif }}
+          category: trivy-image-${{ inputs.image }}
+
+      # Push đúng bản vừa quét: cùng input với bước load (kể cả nhãn created), mọi bước Dockerfile lấy lại từ cache
+      # của builder trong job này, không chạy lại (mẫu "Test before push" của Docker). Không cache-to: bước load
+      # đã ghi. Tag = SHA đầy đủ của commit, không latest (ci-cd.md, "Image, SBOM, provenance").
       - id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -147,15 +294,36 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          # Tag = SHA đầy đủ của commit, không latest (ci-cd.md, "Image, SBOM, provenance").
           tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
-          # Nối package với repo một cách tường minh. Push bằng GITHUB_TOKEN vốn đã tự nối, nhãn này giữ cho việc
-          # nối không phụ thuộc vào cách push.
-          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.name.outputs.created }}
+          cache-from: type=gha,scope=${{ inputs.image }}
 
-      # Ghi digest ra trang tóm tắt của run, để so với imagetools inspect mà không phải mở log.
-      - name: Ghi digest vào summary
+      # Chứng minh bản trên GHCR là bản đã quét: danh sách diff_id (digest của từng layer chưa nén, tức nội dung
+      # filesystem) của image vừa push phải trùng image đã nạp và quét. Khác thì fail: tag đã lên GHCR nhưng run đỏ,
+      # gitops (G0-24) không nhận digest này. Config digest (Image ID) chỉ ghi ra để so, không chặn.
+      - name: Kiểm bản push trùng bản đã quét
         env:
           IMAGE: ${{ steps.name.outputs.image }}
           DIGEST: ${{ steps.push.outputs.digest }}
-        run: echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` digest \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+          SCANNED_ID: ${{ steps.load.outputs.imageid }}
+        run: |
+          scanned="$(docker image inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .RootFS.Layers}}' | jq -c .)"
+          pushed="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --format '{{json .Image}}' | jq -c .rootfs.diff_ids)"
+          pushed_config="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw | jq -r .config.digest)"
+          {
+            echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` digest \`${DIGEST}\`"
+            echo ""
+            echo "- Config digest: đã quét \`${SCANNED_ID}\`, trên GHCR \`${pushed_config}\`"
+            echo "- Số layer: $(jq length <<<"$pushed")"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$scanned" != "$pushed" ]]; then
+            echo "::error::Layer của image trên GHCR khác image đã quét."
+            echo "scanned=${scanned}"
+            echo "pushed=${pushed}"
+            exit 1
+          fi
+          echo "Layer trùng nhau ($(jq length <<<"$pushed") layer)."

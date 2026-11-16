@@ -30,12 +30,14 @@ jobs:
   image:
     # Cùng repo nên gọi bằng đường dẫn ./: workflow được gọi lấy từ cùng commit với file này, không cần ghim SHA.
     # Repo khác (ví dụ hello ở ticket G0-23) phải gọi
-    # <owner>/commerce-hub-platform/.github/workflows/container-image.yml@<SHA 40 ký tự> # v0.1.0
+    # <owner>/commerce-hub-platform/.github/workflows/container-image.yml@<SHA 40 ký tự> # vX.Y.Z
     uses: ./.github/workflows/container-image.yml
-    # Mức trần cho mọi job bên trong. Job build tự hạ về contents: read.
+    # Mức trần cho mọi job bên trong. Job build không có packages: write.
     permissions:
       contents: read
       packages: write
+      # Báo cáo Trivy (SARIF) lên Code scanning, từ v0.2.0.
+      security-events: write
     with:
       image: commerce-hub-platform-smoke
       context: .github/ghcr-smoke
