@@ -1,0 +1,143 @@
+# Reusable workflow: build một Dockerfile bằng Buildx cho linux/amd64 và push lên GHCR với tag = git SHA đầy đủ.
+# Chỉ push khi có push vào nhánh mặc định của bên gọi; mọi sự kiện khác (PR, nhánh khác, workflow_dispatch) chỉ build.
+# Chuẩn: docs/standards/ci-cd.md (repo docs), mục "Reusable workflow", "Quyền và credential"; ADR-0017.
+#
+# Bên gọi phải cấp cho job gọi workflow này (workflow được gọi chỉ hạ được quyền, không nâng được):
+#   permissions:
+#     contents: read    # checkout
+#     packages: write   # chỉ job publish dùng; job build tự hạ về contents: read
+# Không cần secret: push bằng GITHUB_TOKEN của lần chạy.
+name: container-image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Tên image trên GHCR, không kèm registry và owner (ví dụ commerce-hub-hello). Chữ thường.
+        type: string
+        required: true
+      context:
+        # Path context thay cho Git context mặc định của build-push-action: build đúng những file vừa checkout,
+        # và .dockerignore có tác dụng như khi build trên máy.
+        description: Thư mục build context, tính từ gốc repo của bên gọi. Dockerfile nằm ở <context>/Dockerfile.
+        type: string
+        default: .
+      timeout-minutes:
+        # Mặc định của GitHub cho mỗi job là 360 phút (chưa xác minh, ci-cd.md): quá dài cho một build hỏng.
+        description: Thời gian tối đa của mỗi job (phút).
+        type: number
+        default: 15
+    outputs:
+      # Ánh xạ output của job thành output của workflow; bên gọi đọc bằng needs.<job gọi>.outputs.digest.
+      # Ticket G0-23 dùng digest này để ghi vào gitops (deploy theo digest, không theo tag).
+      image:
+        description: Tên đầy đủ ghcr.io/<owner>/<image>, không kèm tag. Rỗng nếu không push.
+        value: ${{ jobs.publish.outputs.image }}
+      digest:
+        description: Digest sha256 của image vừa push. Rỗng nếu không push.
+        value: ${{ jobs.publish.outputs.digest }}
+
+# Mặc định cho mọi job: chỉ đọc mã nguồn. Khai một scope thì các scope còn lại thành none.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    # Mọi sự kiện TRỪ push vào nhánh mặc định. Biểu thức mở đầu bằng ! phải bọc trong ${{ }}: trong YAML,
+    # ! ở đầu giá trị là ký hiệu tag, file sẽ hỏng cú pháp.
+    # So github.ref với refs/heads/<nhánh mặc định> thay vì so github.ref_name: một tag tên "main" cũng có
+    # ref_name là "main".
+    if: ${{ !(github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
+    # Ghim bản image runner thay cho ubuntu-latest: nhãn latest đổi bản OS mà không báo trước.
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      # Hạ xuống chỉ đọc dù bên gọi cấp packages: write: job chạy cho PR không bao giờ ghi được package.
+      contents: read
+    steps:
+      # Ghim SHA 40 ký tự lấy từ repo gốc, comment là version để Dependabot cập nhật.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Không để GITHUB_TOKEN lại trong .git/config: không bước nào cần git push.
+          persist-credentials: false
+
+      # Builder docker-container (mặc định của action) để có đủ tính năng BuildKit, giống build trên Mac.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          # Cụm chạy amd64 (docs/homelab-hyperv.md); runner ubuntu-24.04 cũng là amd64 nên không cần QEMU.
+          platforms: linux/amd64
+          # Luôn kéo lại base image theo digest đã ghim, không dùng bản cache cũ trên builder.
+          pull: true
+          push: false
+          # Action mặc định đính attestation provenance vào image, khiến registry nhận một image index thay vì
+          # một manifest. Attestation hoãn tới G7 (ci-cd.md, "Image, SBOM, provenance"), nên tắt cả hai.
+          provenance: false
+          sbom: false
+
+  publish:
+    name: publish
+    # Chỉ push vào nhánh mặc định: PR (kể cả từ fork), nhánh khác và workflow_dispatch không bao giờ push.
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      # Ghi package lên GHCR bằng GITHUB_TOKEN. Token này hết hạn khi job xong, không có secret dài hạn nào.
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      # Tên trên GHCR phải là chữ thường, mà owner trên GitHub có thể có chữ hoa. Expression của Actions không có
+      # hàm lowercase, nên đổi bằng ${VAR,,} của bash. Input đi qua env rồi mới vào shell, không chèn ${{ }}
+      # thẳng vào run (chặn script injection, ci-cd.md "Quyền và credential").
+      - name: Tính tên image
+        id: ref
+        env:
+          IMAGE: ${{ inputs.image }}
+        run: |
+          if [[ ! "$IMAGE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "::error::Tên image '${IMAGE}' không hợp lệ: chỉ chữ thường, số và . _ - ở giữa."
+            exit 1
+          fi
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Đăng nhập ghcr.io bằng token của lần chạy. Mặc định logout: true: bước post xóa credential khỏi
+      # ~/.docker/config.json khi job kết thúc.
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          platforms: linux/amd64
+          pull: true
+          push: true
+          provenance: false
+          sbom: false
+          # Tag = SHA đầy đủ của commit, không latest (ci-cd.md, "Image, SBOM, provenance").
+          tags: ${{ steps.ref.outputs.image }}:${{ github.sha }}
+          # Nối package với repo một cách tường minh. Push bằng GITHUB_TOKEN vốn đã tự nối, nhãn này giữ cho việc
+          # nối không phụ thuộc vào cách push.
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # Ghi digest ra trang tóm tắt của run, để so với imagetools inspect mà không phải mở log.
+      - name: Ghi digest vào summary
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` digest \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
