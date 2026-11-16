@@ -32,7 +32,7 @@ Service Java gọi `java-service.yml`:
 jobs:
   ci:
     # Ghim SHA 40 ký tự của commit release, comment là tên release. Không ghim tag hay nhánh.
-    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/java-service.yml@<SHA của v0.2.0> # v0.2.0
+    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/java-service.yml@4714554242fedd3f829228dc9ee1913eacdaaf7f # v0.2.0
     # Quyền tối đa bên gọi cấp; workflow được gọi chỉ hạ được, không nâng được. Mỗi job bên trong tự hạ:
     # contents: write chỉ cho dependency-graph trên nhánh mặc định, packages: write chỉ cho job publish.
     permissions:
