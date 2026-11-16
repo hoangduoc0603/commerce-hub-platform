@@ -89,14 +89,17 @@ jobs:
       # Ghi package lên GHCR bằng GITHUB_TOKEN. Token này hết hạn khi job xong, không có secret dài hạn nào.
       packages: write
     outputs:
-      image: ${{ steps.ref.outputs.image }}
+      image: ${{ steps.name.outputs.image }}
       digest: ${{ steps.push.outputs.digest }}
+    # Các bước checkout, setup-buildx và các khóa with chung của build-push-action (context, platforms, pull,
+    # provenance, sbom) lặp lại job build: permissions không đặt theo điều kiện được nên phải là hai job.
+    # Sửa một bên thì sửa cả bên kia.
     steps:
       # Tên trên GHCR phải là chữ thường, mà owner trên GitHub có thể có chữ hoa. Expression của Actions không có
       # hàm lowercase, nên đổi bằng ${VAR,,} của bash. Input đi qua env rồi mới vào shell, không chèn ${{ }}
       # thẳng vào run (chặn script injection, ci-cd.md "Quyền và credential").
       - name: Tính tên image
-        id: ref
+        id: name
         env:
           IMAGE: ${{ inputs.image }}
         run: |
@@ -120,6 +123,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Tag = SHA chỉ được trỏ vào một digest (ci-cd.md, "Lệch chuẩn có chủ đích ở home lab": CI kiểm tag chưa
+      # tồn tại trước khi push). Re-run một lần chạy push sẽ build lại, BuildKit thường cho digest khác, và đẩy đè
+      # tag mà gitops có thể đang trỏ theo. Chỉ fail khi inspect THÀNH CÔNG (tag đã có): package chưa từng tồn tại
+      # trả lỗi khác "not found" (thử 2026-11-16, ẩn danh: 403), mà lần push đầu của package mới phải đi qua.
+      - name: Kiểm tag chưa tồn tại
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+        run: |
+          if out="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" 2>&1)"; then
+            echo "::error::${IMAGE}:${GITHUB_SHA} đã có trên GHCR; không push đè (re-run của một lần chạy đã push?)."
+            echo "$out"
+            exit 1
+          fi
+          echo "Chưa có ${IMAGE}:${GITHUB_SHA}: ${out}"
+
       - id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -130,7 +148,7 @@ jobs:
           provenance: false
           sbom: false
           # Tag = SHA đầy đủ của commit, không latest (ci-cd.md, "Image, SBOM, provenance").
-          tags: ${{ steps.ref.outputs.image }}:${{ github.sha }}
+          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
           # Nối package với repo một cách tường minh. Push bằng GITHUB_TOKEN vốn đã tự nối, nhãn này giữ cho việc
           # nối không phụ thuộc vào cách push.
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -138,6 +156,6 @@ jobs:
       # Ghi digest ra trang tóm tắt của run, để so với imagetools inspect mà không phải mở log.
       - name: Ghi digest vào summary
         env:
-          IMAGE: ${{ steps.ref.outputs.image }}
+          IMAGE: ${{ steps.name.outputs.image }}
           DIGEST: ${{ steps.push.outputs.digest }}
         run: echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` digest \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
