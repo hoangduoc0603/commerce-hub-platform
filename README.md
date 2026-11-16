@@ -9,12 +9,45 @@ Hạ tầng và công cụ dùng chung cho mọi repo của commerce-hub.
 | `charts/` | Helm chart dùng chung `app` cho mọi workload (service, `marketplace-sim`, `seller-web`), publish lên OCI registry (theo ticket 11 trong `docs/.scratch/architecture-g0-g1/`) |
 | `docs/` | Hướng dẫn dựng hạ tầng (homelab Hyper-V) |
 | `scripts/github/` | Tạo và kiểm repo GitHub theo chuẩn repo public (`repo-bootstrap.sh`, `repo-audit.sh`) |
-| `.github/workflows/` | Reusable workflow cho CI của các repo (`java-service.yml` và các workflow khác thêm từ ticket G0-17) |
+| `.github/workflows/` | Reusable workflow cho CI của các repo (mục [Reusable workflow](#reusable-workflow)) và workflow thử của chính repo này |
 
 Cụm chạy chính là cụm Kubernetes home lab (kubeadm trên Hyper-V ở máy bàn, truy cập từ MacBook qua Tailscale, context `kubectl` là `homelab`). Kafka, PostgreSQL, Redis, OpenSearch chạy trong cụm này. Cách dựng xem [`docs/homelab-hyperv.md`](docs/homelab-hyperv.md). `compose/` và `kind/` chỉ dùng khi cần chạy thử nhanh trên MacBook.
 
 ## Reusable workflow
 
-Chưa có workflow nào; ticket G0-17 thêm workflow đầu tiên. `java-library.yml` (publish thư viện Java lên GitHub Packages từ tag, viết cho `libs/service-kit` ở G0-18) đã xóa ngày 2026-11-15 khi dự án thôi dùng thư viện dùng chung (ADR-0018 trong repo `docs`); mã cũ ở commit `f836c28`, `contracts` dùng lại khi viết bước publish Maven.
+Workflow dùng chung nằm ở `.github/workflows/`, gọi bằng `jobs.<id>.uses`. Chuẩn: `docs/standards/ci-cd.md` (repo `docs`), mục "Reusable workflow" và "Quyền và credential".
 
-Bên gọi ghim workflow bằng SHA 40 ký tự của commit, kèm comment. Workflow được gọi chỉ hạ được quyền so với bên gọi, không nâng được, nên mỗi job trong đó tự khai đúng phần nó cần.
+| Workflow | Làm gì | Từ |
+|---|---|---|
+| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`. Push vào nhánh mặc định thì push lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác (PR, nhánh khác, `workflow_dispatch`) chỉ build | `v0.1.0` |
+
+`ghcr-smoke.yml` là workflow thử của chính repo này: nó gọi `container-image.yml` với image `.github/ghcr-smoke/` (`FROM scratch`).
+
+### Gọi từ repo khác
+
+```yaml
+jobs:
+  image:
+    # Ghim SHA 40 ký tự của commit release, comment là tên release. Không ghim tag hay nhánh.
+    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@<SHA của v0.1.0> # v0.1.0
+    # Quyền tối đa bên gọi cấp; workflow được gọi chỉ hạ được, không nâng được.
+    # Job build (PR) tự hạ về contents: read; chỉ job publish (push vào nhánh mặc định) dùng packages: write.
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image: commerce-hub-<tên repo>   # chữ thường
+      # context: .                     # mặc định gốc repo
+```
+
+Output: `needs.image.outputs.image` (`ghcr.io/<owner>/<image>`) và `needs.image.outputs.digest` (`sha256:…`), chỉ có giá trị khi đã push. Không cần secret nào: push bằng `GITHUB_TOKEN`.
+
+Package GHCR tạo từ workflow của repo public sẽ tự public và tự nối với repo đó (đã xác minh 2026-11-16, ticket G0-17), nên cụm kéo image không cần pull secret.
+
+### Phát hành
+
+- Version theo SemVer, phát hành bằng GitHub release `vX.Y.Z` trên commit của `main`. Đổi input, output hoặc quyền theo kiểu phá vỡ thì tăng MAJOR; thêm input có mặc định thì tăng MINOR; sửa lỗi thì tăng PATCH.
+- Repo bật immutable releases: tag của release khóa vào commit, không dời hay xóa được; tên release đã dùng thì không dùng lại được. Ruleset `release-tags-immutable` chặn dời và xóa mọi tag `v*`, kể cả tag không có release.
+- Lấy SHA để ghim: `gh api repos/hoangduoc0603/commerce-hub-platform/commits/vX.Y.Z --jq .sha`.
+
+Lịch sử: `java-library.yml` (publish thư viện Java lên GitHub Packages từ tag, viết cho `libs/service-kit` ở G0-18) đã xóa ngày 2026-11-15 khi dự án thôi dùng thư viện dùng chung (ADR-0018 trong repo `docs`); mã cũ ở commit `f836c28`, `contracts` dùng lại khi viết bước publish Maven.
