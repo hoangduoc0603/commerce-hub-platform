@@ -19,7 +19,7 @@ Workflow dùng chung nằm ở `.github/workflows/`, gọi bằng `jobs.<id>.use
 
 | Workflow | Làm gì | Từ |
 |---|---|---|
-| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`, nạp vào Docker, quét Trivy (chặn HIGH/CRITICAL đã có bản vá, đẩy SARIF lên Code scanning). Push vào nhánh mặc định thì mới push đúng bản đã quét lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác chỉ build và quét. Tag đã có thì fail, không push đè (`v0.1.1`). Nhãn OCI `source`, `revision`, `version`, `created`, cache BuildKit `type=gha`, tải artifact trước khi build (`v0.2.0`) | `v0.1.0` |
+| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`, nạp vào Docker, quét Trivy (chặn HIGH/CRITICAL đã có bản vá, đẩy SARIF lên Code scanning). Push vào nhánh mặc định thì mới push đúng bản đã quét lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác chỉ build và quét. Tag đã có thì fail, không push đè (`v0.1.1`). Nhãn OCI `source`, `revision`, `version`, `created`, cache BuildKit `type=gha`, tải artifact trước khi build (`v0.2.0`). Push theo digest, kiểm layer trùng bản đã quét rồi mới gắn tag SHA bằng `skopeo copy --preserve-digests` (`v0.2.1`) | `v0.1.0` |
 | `java-service.yml` | Service Spring Boot: `./gradlew build`, upload jar, gửi dependency graph Gradle (chỉ nhánh mặc định), rồi gọi lồng `container-image.yml` với jar đó | `v0.2.0` |
 
 `ghcr-smoke.yml` là workflow thử của chính repo này: nó gọi `container-image.yml` với image `.github/ghcr-smoke/` (`FROM scratch`).
