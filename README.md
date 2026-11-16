@@ -19,7 +19,7 @@ Workflow dùng chung nằm ở `.github/workflows/`, gọi bằng `jobs.<id>.use
 
 | Workflow | Làm gì | Từ |
 |---|---|---|
-| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`. Push vào nhánh mặc định thì push lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác (PR, nhánh khác, `workflow_dispatch`) chỉ build | `v0.1.0` |
+| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`. Push vào nhánh mặc định thì push lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác (PR, nhánh khác, `workflow_dispatch`) chỉ build. Tag đã có thì fail, không push đè (`v0.1.1`) | `v0.1.0` |
 
 `ghcr-smoke.yml` là workflow thử của chính repo này: nó gọi `container-image.yml` với image `.github/ghcr-smoke/` (`FROM scratch`).
 
@@ -29,7 +29,7 @@ Workflow dùng chung nằm ở `.github/workflows/`, gọi bằng `jobs.<id>.use
 jobs:
   image:
     # Ghim SHA 40 ký tự của commit release, comment là tên release. Không ghim tag hay nhánh.
-    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@84bd94d3139e967b4120fbbe3ea6deef3fc0b8f8 # v0.1.0
+    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@c4b5d70da6b2b2f82edff675938c3d254b23129a # v0.1.1
     # Quyền tối đa bên gọi cấp; workflow được gọi chỉ hạ được, không nâng được.
     # Job build (PR) tự hạ về contents: read; chỉ job publish (push vào nhánh mặc định) dùng packages: write.
     permissions:
