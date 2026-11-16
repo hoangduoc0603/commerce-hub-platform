@@ -1,0 +1,133 @@
+# Reusable workflow cho service Spring Boot (services/*, simulators/*): build và test bằng Gradle, gửi dependency graph
+# từ nhánh mặc định, rồi gọi lồng container-image.yml để build image từ jar, quét Trivy và push GHCR.
+# Chuẩn: docs/standards/ci-cd.md, docs/standards/container-image.md (repo docs). Quyết định: ticket G0-23 Q7–Q11.
+#
+# Bên gọi phải cấp cho job gọi workflow này (workflow được gọi chỉ hạ được quyền, không nâng được):
+#   permissions:
+#     contents: write         # chỉ job dependency-graph dùng (push vào nhánh mặc định); job khác hạ về read
+#     packages: write         # chỉ job publish của container-image.yml dùng
+#     security-events: write  # báo cáo Trivy (SARIF) lên Code scanning
+# Không cần secret.
+name: java-service
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Tên image trên GHCR, không kèm registry và owner (thường là tên repo, ví dụ commerce-hub-hello).
+        type: string
+        required: true
+      java-version:
+        description: Phiên bản JDK Temurin cho setup-java. Khớp toolchain trong build.gradle.
+        type: string
+        default: '25'
+      timeout-minutes:
+        # Mặc định của GitHub cho mỗi job là 360 phút (chưa xác minh, ci-cd.md): quá dài cho một build hỏng.
+        description: Thời gian tối đa của mỗi job (phút).
+        type: number
+        default: 20
+    outputs:
+      image:
+        description: Tên đầy đủ ghcr.io/<owner>/<image>, không kèm tag. Rỗng nếu không push.
+        value: ${{ jobs.image.outputs.image }}
+      digest:
+        description: Digest sha256 của image vừa push. Rỗng nếu không push.
+        value: ${{ jobs.image.outputs.digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      # Cache Gradle: mặc định chỉ ghi khi chạy trên nhánh mặc định (cache-read-only = true ở nhánh khác), và kiểm
+      # checksum gradle-wrapper.jar (validate-wrappers = true).
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          # basic: cache mã nguồn mở của GitHub Actions. enhanced (mặc định v6) là thành phần độc quyền, phải chấp
+          # nhận điều khoản riêng (java-library.md, bảng lựa chọn).
+          cache-provider: basic
+
+      # build = check (test) + assemble (bootJar). Jar build ở đây một lần rồi chuyền sang job image: Dockerfile
+      # chỉ COPY jar, không biên dịch (container-image.md).
+      - name: Build và test
+        run: ./gradlew build
+
+      # Báo cáo JUnit XML khi job đỏ, để đọc lỗi mà không phải chạy lại.
+      - name: Upload báo cáo test
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: '**/build/test-results/**/*.xml'
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Artifact chứa đúng file jar ở gốc (upload-artifact bỏ phần đường dẫn chung build/libs/); container-image.yml
+      # giải nén lại vào build/libs/ để Dockerfile COPY build/libs/*.jar khớp. Chỉ sống 1 ngày: dùng trong lần chạy này.
+      - name: Upload jar
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: jar
+          path: build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 1
+
+  dependency-graph:
+    name: dependency-graph
+    # Chỉ nhánh mặc định: dependency graph của repo phản ánh code đang ở main, Dependabot alerts đọc từ đây.
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # Chạy sau check: không gửi graph của build đỏ, và đọc lại cache Gradle mà check vừa ghi (hai job song song tranh
+    # quyền ghi cùng key cache, đã thấy ở G0-18).
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      # Dependency submission API cần quyền ghi nội dung repo.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      # Gửi phụ thuộc Gradle lên dependency graph để Dependabot tạo alert bảo mật (ci-cd.md, "Build, cache, test").
+      - uses: gradle/actions/dependency-submission@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-provider: basic
+          cache-read-only: true
+          dependency-graph: generate-and-submit
+
+  image:
+    name: image
+    needs: check
+    # Gọi lồng bằng đường dẫn đầy đủ ghim SHA, không dùng ./: trong workflow nằm giữa chuỗi, ./ trỏ về repo nào
+    # chưa xác minh (G0-23 Q7). Sửa container-image.yml thì commit trước, rồi đổi SHA ở đây.
+    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@217c655e76ddc3dd695f6c146a6a20cce4cbb153 # main sau G0-23 bước 9a
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    with:
+      image: ${{ inputs.image }}
+      artifact: jar
+      artifact-path: build/libs
+      timeout-minutes: ${{ inputs.timeout-minutes }}
