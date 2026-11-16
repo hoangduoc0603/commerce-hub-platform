@@ -19,34 +19,42 @@ Workflow dùng chung nằm ở `.github/workflows/`, gọi bằng `jobs.<id>.use
 
 | Workflow | Làm gì | Từ |
 |---|---|---|
-| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`. Push vào nhánh mặc định thì push lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác (PR, nhánh khác, `workflow_dispatch`) chỉ build. Tag đã có thì fail, không push đè (`v0.1.1`) | `v0.1.0` |
+| `container-image.yml` | Build `<context>/Dockerfile` bằng Buildx cho `linux/amd64`, nạp vào Docker, quét Trivy (chặn HIGH/CRITICAL đã có bản vá, đẩy SARIF lên Code scanning). Push vào nhánh mặc định thì mới push đúng bản đã quét lên `ghcr.io/<owner>/<image>:<git SHA>` và trả `digest`; sự kiện khác chỉ build và quét. Tag đã có thì fail, không push đè (`v0.1.1`). Nhãn OCI `source`, `revision`, `version`, `created`, cache BuildKit `type=gha`, tải artifact trước khi build (`v0.2.0`) | `v0.1.0` |
+| `java-service.yml` | Service Spring Boot: `./gradlew build`, upload jar, gửi dependency graph Gradle (chỉ nhánh mặc định), rồi gọi lồng `container-image.yml` với jar đó | `v0.2.0` |
 
 `ghcr-smoke.yml` là workflow thử của chính repo này: nó gọi `container-image.yml` với image `.github/ghcr-smoke/` (`FROM scratch`).
 
 ### Gọi từ repo khác
 
+Service Java gọi `java-service.yml`:
+
 ```yaml
 jobs:
-  image:
+  ci:
     # Ghim SHA 40 ký tự của commit release, comment là tên release. Không ghim tag hay nhánh.
-    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@c4b5d70da6b2b2f82edff675938c3d254b23129a # v0.1.1
-    # Quyền tối đa bên gọi cấp; workflow được gọi chỉ hạ được, không nâng được.
-    # Job build (PR) tự hạ về contents: read; chỉ job publish (push vào nhánh mặc định) dùng packages: write.
+    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/java-service.yml@<SHA của v0.2.0> # v0.2.0
+    # Quyền tối đa bên gọi cấp; workflow được gọi chỉ hạ được, không nâng được. Mỗi job bên trong tự hạ:
+    # contents: write chỉ cho dependency-graph trên nhánh mặc định, packages: write chỉ cho job publish.
     permissions:
-      contents: read
+      contents: write
       packages: write
+      security-events: write
     with:
       image: commerce-hub-<tên repo>   # chữ thường
-      # context: .                     # mặc định gốc repo
+      # java-version: '25'
 ```
 
-Output: `needs.image.outputs.image` (`ghcr.io/<owner>/<image>`) và `needs.image.outputs.digest` (`sha256:…`), chỉ có giá trị khi đã push. Không cần secret nào: push bằng `GITHUB_TOKEN`.
+Repo khác (Dockerfile không cần jar) gọi thẳng `container-image.yml` với cùng cách ghim, quyền `contents: read`, `packages: write`, `security-events: write`, và input `image`, `context` (mặc định `.`), `artifact`, `artifact-path` (mặc định không tải).
+
+Output của cả hai: `needs.<job>.outputs.image` (`ghcr.io/<owner>/<image>`) và `needs.<job>.outputs.digest` (`sha256:…`), chỉ có giá trị khi đã push. Không cần secret nào: push bằng `GITHUB_TOKEN`.
+
+Ngoại lệ Trivy ghi trong `<context>/.trivyignore`, mỗi mã CVE kèm lý do và ngày hết hạn.
 
 Package GHCR tạo từ workflow của repo public sẽ tự public và tự nối với repo đó (đã xác minh 2026-11-16, ticket G0-17), nên cụm kéo image không cần pull secret.
 
 ### Phát hành
 
-- Version theo SemVer, phát hành bằng GitHub release `vX.Y.Z` trên commit của `main`. Đổi input, output hoặc quyền theo kiểu phá vỡ thì tăng MAJOR; thêm input có mặc định thì tăng MINOR; sửa lỗi thì tăng PATCH.
+- Version theo SemVer, phát hành bằng GitHub release `vX.Y.Z` trên commit của `main`. Đổi input, output hoặc quyền theo kiểu phá vỡ thì tăng MAJOR; thêm input có mặc định thì tăng MINOR; sửa lỗi thì tăng PATCH. Còn ở `0.x` thì đổi phá vỡ tăng MINOR (SemVer mục 4): `v0.2.0` bắt bên gọi cấp thêm `security-events: write`.
 - Repo bật immutable releases: tag của release khóa vào commit, không dời hay xóa được; tên release đã dùng thì không dùng lại được. Ruleset `release-tags-immutable` chặn dời và xóa mọi tag `v*`, kể cả tag không có release.
 - Lấy SHA để ghim: `gh api repos/hoangduoc0603/commerce-hub-platform/commits/vX.Y.Z --jq .sha`.
 
