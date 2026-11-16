@@ -284,17 +284,20 @@ jobs:
 
       # Push đúng bản vừa quét: cùng input với bước load (kể cả nhãn created), mọi bước Dockerfile lấy lại từ cache
       # của builder trong job này, không chạy lại (mẫu "Test before push" của Docker). Không cache-to: bước load
-      # đã ghi. Tag = SHA đầy đủ của commit, không latest (ci-cd.md, "Image, SBOM, provenance").
+      # đã ghi.
+      # Push theo digest, CHƯA gắn tag (review G0-23): nếu bước kiểm dưới đây thấy bản push khác bản đã quét thì không
+      # có tag nào trỏ vào nó, gitops không nhận, và re-run vẫn qua được bước "Kiểm tag chưa tồn tại". Bản lỗi chỉ để
+      # lại một version không tag trên GHCR. Cách viết outputs theo mẫu "Distribute build across multiple runners"
+      # của Docker (push-by-digest, name-canonical).
       - id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ inputs.context }}
           platforms: linux/amd64
           pull: true
-          push: true
+          outputs: type=image,"name=${{ steps.name.outputs.image }}",push-by-digest=true,name-canonical=true,push=true
           provenance: false
           sbom: false
-          tags: ${{ steps.name.outputs.image }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -303,8 +306,8 @@ jobs:
           cache-from: type=gha,scope=${{ inputs.image }}
 
       # Chứng minh bản trên GHCR là bản đã quét: danh sách diff_id (digest của từng layer chưa nén, tức nội dung
-      # filesystem) của image vừa push phải trùng image đã nạp và quét. Khác thì fail: tag đã lên GHCR nhưng run đỏ,
-      # gitops (G0-24) không nhận digest này. Config digest (Image ID) chỉ ghi ra để so, không chặn.
+      # filesystem) của image vừa push phải trùng image đã nạp và quét. Khác thì fail trước khi gắn tag.
+      # Config digest (Image ID) chỉ ghi ra để so, không chặn.
       - name: Kiểm bản push trùng bản đã quét
         env:
           IMAGE: ${{ steps.name.outputs.image }}
@@ -314,16 +317,31 @@ jobs:
           scanned="$(docker image inspect "${IMAGE}:${GITHUB_SHA}" --format '{{json .RootFS.Layers}}' | jq -c .)"
           pushed="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --format '{{json .Image}}' | jq -c .rootfs.diff_ids)"
           pushed_config="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" --raw | jq -r .config.digest)"
-          {
-            echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` digest \`${DIGEST}\`"
-            echo ""
-            echo "- Config digest: đã quét \`${SCANNED_ID}\`, trên GHCR \`${pushed_config}\`"
-            echo "- Số layer: $(jq length <<<"$pushed")"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "- Config digest: đã quét \`${SCANNED_ID}\`, trên GHCR \`${pushed_config}\`" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$scanned" != "$pushed" ]]; then
-            echo "::error::Layer của image trên GHCR khác image đã quét."
+            echo "::error::Layer của image trên GHCR (${DIGEST}) khác image đã quét; không gắn tag."
             echo "scanned=${scanned}"
             echo "pushed=${pushed}"
             exit 1
           fi
           echo "Layer trùng nhau ($(jq length <<<"$pushed") layer)."
+
+      # Gắn tag = SHA đầy đủ của commit vào đúng manifest đã kiểm, không latest (ci-cd.md, "Image, SBOM, provenance").
+      # Không dùng docker buildx imagetools create: với một manifest nguồn nó tạo image index MỚI, digest khác (thử
+      # 2026-11-17 trên registry:2). skopeo copy --preserve-digests ghi lại đúng byte manifest dưới tag mới và từ chối
+      # nếu phải đổi digest; blob đã có trong repo nên không tải lên lại. skopeo có sẵn trên runner ubuntu-24.04
+      # (Skopeo 1.13.3, README runner-images, tra 2026-11-17). Credential đọc từ ~/.docker/config.json do
+      # docker/login-action ghi.
+      - name: Gắn tag SHA
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          skopeo copy --preserve-digests --authfile "${HOME}/.docker/config.json" \
+            "docker://${IMAGE}@${DIGEST}" "docker://${IMAGE}:${GITHUB_SHA}"
+          tagged="$(docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}" --format '{{.Manifest.Digest}}')"
+          if [[ "$tagged" != "$DIGEST" ]]; then
+            echo "::error::Tag ${GITHUB_SHA} trỏ vào ${tagged}, không phải ${DIGEST}."
+            exit 1
+          fi
+          echo "Pushed \`${IMAGE}:${GITHUB_SHA}\` digest \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
