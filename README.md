@@ -13,6 +13,21 @@ Hạ tầng và công cụ dùng chung cho mọi repo của commerce-hub.
 
 Cụm chạy chính là cụm Kubernetes home lab (kubeadm trên Hyper-V ở máy bàn, truy cập từ MacBook qua Tailscale, context `kubectl` là `homelab`). Kafka, PostgreSQL, Redis, OpenSearch chạy trong cụm này. Cách dựng xem [`docs/homelab-hyperv.md`](docs/homelab-hyperv.md). `compose/` và `kind/` chỉ dùng khi cần chạy thử nhanh trên MacBook.
 
+## Chart `app`
+
+Chart dùng chung `charts/app` cho mọi workload, publish lên `oci://ghcr.io/hoangduoc0603/charts/app` (package public, kéo không cần đăng nhập). Chuẩn: `docs/standards/helm-chart.md` (repo `docs`); thiết kế ở ticket G0-21.
+
+- Bắt buộc trong values: `image.repository`, `image.digest`, `resources.requests.cpu`, `resources.requests.memory`. Thiếu thì `helm template` lỗi với thông điệp rõ.
+- Chart tự đặt, values không đổi được: Pod Security "restricted", root chỉ đọc và `/tmp` emptyDir, `limits.memory = requests.memory`, không CPU limit, probe `/livez` `/readyz` trên cổng `http`, rolling update `maxSurge 1` `maxUnavailable 0`, `preStop` 10 s, grace 60 s.
+- Chỉnh qua values: `replicaCount`, `ports` (map tên → số), `jvm.*` (ghép `JAVA_TOOL_OPTIONS`), `env` (ConfigMap, giá trị phải là chuỗi), `secretRevision`, `probes.startupFailureThreshold`. Mô tả từng value ở `charts/app/values.yaml`.
+- Biến thể được CI kiểm: `charts/app/ci/*-values.yaml`.
+
+Workflow `chart.yml`: PR đổi `charts/**` hoặc chính workflow thì `helm lint --strict`, `kubeconform` (Kubernetes 1.37.0) từng biến thể `ci/` và test thiếu value bắt buộc. Push vào `main` đổi `charts/**` thì kiểm thêm, rồi package và push nếu version trong `Chart.yaml` chưa có trên GHCR. **Mỗi PR đổi chart phải tăng `version`** (SemVer: đổi nghĩa hay xóa value tăng MAJOR, thêm value tăng MINOR, sửa template tăng PATCH); version đã có thì job `publish` fail.
+
+```bash
+helm show chart oci://ghcr.io/hoangduoc0603/charts/app --version 0.1.1
+```
+
 ## Reusable workflow
 
 Workflow dùng chung nằm ở `.github/workflows/`, gọi bằng `jobs.<id>.uses`. Chuẩn: `docs/standards/ci-cd.md` (repo `docs`), mục "Reusable workflow" và "Quyền và credential".
