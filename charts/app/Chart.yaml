@@ -2,7 +2,7 @@ apiVersion: v2
 name: app
 description: Chart dùng chung cho mọi workload của commerce-hub (service Spring Boot, marketplace-sim, seller-web)
 type: application
-version: 0.1.1
+version: 0.2.0
 # Không đặt appVersion: chart dùng chung, image do values.image của từng service quyết định.
 # Hậu tố -0 để bản pre-release (1.36.0-rc.1) cũng khớp.
 kubeVersion: ">=1.35.0-0"

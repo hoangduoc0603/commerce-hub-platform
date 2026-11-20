@@ -6,6 +6,7 @@ Hạ tầng và công cụ dùng chung cho mọi repo của commerce-hub.
 |---|---|
 | `compose/` | Docker Compose dựng hạ tầng chạy local (PostgreSQL, Kafka, Schema Registry, Keycloak, ...) |
 | `kind/` | Cấu hình cụm kind và add-on |
+| `kubeconform-schemas/` | Schema JSON của kind từ CRD (`HTTPRoute`) cho kubeconform trong `chart.yml` |
 | `charts/` | Helm chart dùng chung `app` cho mọi workload (service, `marketplace-sim`, `seller-web`), publish lên OCI registry (theo ticket 11 trong `docs/.scratch/architecture-g0-g1/`) |
 | `docs/` | Hướng dẫn dựng hạ tầng (homelab Hyper-V) |
 | `scripts/github/` | Tạo và kiểm repo GitHub theo chuẩn repo public (`repo-bootstrap.sh`, `repo-audit.sh`) |
@@ -20,12 +21,14 @@ Chart dùng chung `charts/app` cho mọi workload, publish lên `oci://ghcr.io/h
 - Bắt buộc trong values: `image.repository`, `image.digest`, `resources.requests.cpu`, `resources.requests.memory`. Thiếu thì `helm template` lỗi với thông điệp rõ.
 - Chart tự đặt, values không đổi được: Pod Security "restricted", root chỉ đọc và `/tmp` emptyDir, `limits.memory = requests.memory`, không CPU limit, probe `/livez` `/readyz` trên cổng `http`, rolling update `maxSurge 1` `maxUnavailable 0`, `preStop` 10 s, grace 60 s.
 - Chỉnh qua values: `replicaCount`, `ports` (map tên → số), `jvm.*` (ghép `JAVA_TOOL_OPTIONS`), `env` (ConfigMap, giá trị phải là chuỗi), `secretRevision`, `probes.startupFailureThreshold`. Mô tả từng value ở `charts/app/values.yaml`.
+- Trust của lab (từ 0.2.0, G0-22): `trust.enabled` mặc định `true`, mount `/etc/trust/bundle.p12` (ConfigMap `lab-trust`) và `/etc/trust/lab-root-ca.pem` (ConfigMap `lab-root`) do trust-manager chép vào namespace mang nhãn `trust.lab.internal/inject: "true"`. JVM nhận `-Djavax.net.ssl.trustStore` ở cuối `JAVA_TOOL_OPTIONS`; `jvm.enabled=false` thì nhận `NODE_EXTRA_CA_CERTS`. Namespace thiếu nhãn thì pod kẹt `ContainerCreating` (cố ý).
+- Cửa vào (từ 0.2.0, G0-22): `httpRoute.enabled`, `httpRoute.hostnames` (mỗi tên đúng một nhãn trước `.lab.internal`), `httpRoute.parentRef` (mặc định `edge/edge`, listener `https`), `httpRoute.timeouts`. Route luôn trỏ cổng `http`. Namespace phải mang nhãn `edge.lab.internal/routes: "true"`.
 - Biến thể được CI kiểm: `charts/app/ci/*-values.yaml`.
 
-Workflow `chart.yml`: PR đổi `charts/**` hoặc chính workflow thì `helm lint --strict`, `kubeconform` (Kubernetes 1.37.0) từng biến thể `ci/` và test thiếu value bắt buộc. Push vào `main` đổi `charts/**` thì kiểm thêm, rồi package và push nếu version trong `Chart.yaml` chưa có trên GHCR. **Mỗi PR đổi chart phải tăng `version`** (SemVer: đổi nghĩa hay xóa value tăng MAJOR, thêm value tăng MINOR, sửa template tăng PATCH); version đã có thì job `publish` fail.
+Workflow `chart.yml`: PR đổi `charts/**`, `kubeconform-schemas/**` hoặc chính workflow thì `helm lint --strict`, `kubeconform` (Kubernetes 1.37.0, cộng schema `HTTPRoute` trong `kubeconform-schemas/`) từng biến thể `ci/` và test thiếu value bắt buộc. Push vào `main` đổi `charts/**` thì kiểm thêm, rồi package và push nếu version trong `Chart.yaml` chưa có trên GHCR. **Mỗi PR đổi chart phải tăng `version`** (SemVer: đổi nghĩa hay xóa value tăng MAJOR, thêm value tăng MINOR, sửa template tăng PATCH); version đã có thì job `publish` fail.
 
 ```bash
-helm show chart oci://ghcr.io/hoangduoc0603/charts/app --version 0.1.1
+helm show chart oci://ghcr.io/hoangduoc0603/charts/app --version 0.2.0
 ```
 
 ## Reusable workflow

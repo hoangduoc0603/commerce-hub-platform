@@ -1,0 +1,44 @@
+{{- /*
+HTTPRoute gắn vào Gateway edge dùng chung (ADR-0013, helm-chart.md "HTTPRoute"). Chart không sinh Ingress và
+không tạo Gateway, chứng chỉ, BackendTLSPolicy: những thứ đó thuộc platform (project commerce còn cấm Gateway).
+Route sai không làm sync lỗi mà chỉ không Accepted, nên chart tự chặn lỗi đoán trước được (thay schema tới G7).
+*/ -}}
+{{- if .Values.httpRoute.enabled }}
+{{- if not .Values.httpRoute.hostnames }}
+{{- fail "httpRoute.hostnames là bắt buộc khi httpRoute.enabled, ví dụ [hello.lab.internal]" }}
+{{- end }}
+{{- range .Values.httpRoute.hostnames }}
+{{- /* Listener https có hostname *.lab.internal: wildcard chỉ phủ đúng một nhãn, a.b.lab.internal không khớp. */}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.lab\\.internal$" (toString .)) }}
+{{- fail (printf "httpRoute.hostnames: %q phải có đúng một nhãn trước .lab.internal (chữ thường, số, -), ví dụ hello.lab.internal" (toString .)) }}
+{{- end }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "app.fullname" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    {{- with .Values.httpRoute.parentRef }}
+    {{- /* sectionName chọn listener https; bỏ đi thì route thử gắn cả listener http, nơi chỉ namespace edge được gắn. */}}
+    - name: {{ .name }}
+      namespace: {{ .namespace }}
+      sectionName: {{ .sectionName }}
+    {{- end }}
+  hostnames:
+    {{- range .Values.httpRoute.hostnames }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    {{- /* Không có matches: mặc định PathPrefix "/", mọi đường dẫn của hostname vào app. */}}
+    - backendRefs:
+        - name: {{ include "app.fullname" . }}
+          {{- /* Cổng của Service trùng số với ports.http. Không trỏ được management: Actuator chỉ mở trong cụm. */}}
+          port: {{ required "ports.http là bắt buộc: HTTPRoute trỏ vào cổng http" .Values.ports.http }}
+      {{- with .Values.httpRoute.timeouts }}
+      timeouts:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

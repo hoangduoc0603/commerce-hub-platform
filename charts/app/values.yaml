@@ -77,6 +77,35 @@ jvm:
   # jvm.extraOptions là cờ thêm, ví dụ "-Xlog:gc". Đặt trước cờ của chart nên không ghi đè được cờ của chart.
   extraOptions: ""
 
+# httpRoute: cửa vào từ ngoài cụm qua Gateway edge dùng chung (ADR-0013, helm-chart.md "HTTPRoute").
+# Route luôn trỏ cổng http (ports.http), không trỏ được cổng management (ticket 22 Q2). TLS kết thúc ở edge
+# bằng chứng chỉ wildcard của lab; app nhận HTTP thường.
+httpRoute:
+  # httpRoute.enabled sinh HTTPRoute. Namespace phải mang nhãn edge.lab.internal/routes: "true" (platform gắn);
+  # thiếu nhãn thì route không Accepted (NotAllowedByListeners) và Argo CD không báo app Healthy.
+  enabled: false
+  # httpRoute.hostnames: bắt buộc khi bật, một route nhiều hostname được. Mỗi tên có đúng một nhãn trước
+  # .lab.internal (a.lab.internal), vì wildcard của listener chỉ phủ một nhãn; chart từ chối tên khác.
+  hostnames: []
+  # httpRoute.parentRef: Gateway và listener mà route gắn vào. Chỉ đổi khi platform có Gateway khác.
+  parentRef:
+    name: edge
+    namespace: edge
+    sectionName: https
+  # httpRoute.timeouts: rules[].timeouts của Gateway API, ví dụ {request: "0s"} cho SSE (từ G2).
+  # Rỗng thì theo mặc định của Envoy Gateway: request timeout 15 s.
+  timeouts: {}
+
+# trust: CA của lab do trust-manager chép vào namespace (helm-chart.md "Trust bundle", ADR-0014, G0-07).
+trust:
+  # trust.enabled mount /etc/trust/bundle.p12 (ConfigMap lab-trust: CA công khai + root lab, cho JVM) và
+  # /etc/trust/lab-root-ca.pem (ConfigMap lab-root: chỉ root lab, cho Node), rồi trỏ runtime vào đó:
+  # jvm.enabled thì nối -Djavax.net.ssl.trustStore vào cuối JAVA_TOOL_OPTIONS, không thì đặt NODE_EXTRA_CA_CERTS.
+  # Namespace phải mang nhãn trust.lab.internal/inject: "true" (platform gắn). Thiếu nhãn thì pod kẹt
+  # ContainerCreating: cố ý, vì JDK 25 thiếu file truststore sẽ lặng lẽ quay về cacerts và chỉ host *.lab.internal hỏng.
+  # Tắt thì JVM chỉ tin cacerts của JDK: gọi https://*.lab.internal lỗi PKIX.
+  enabled: true
+
 # env là cấu hình không bí mật: chart render thành ConfigMap, pod nạp bằng envFrom (ticket 21 Q1).
 # Khóa là tên biến môi trường, viết HOA_GẠCH_DƯỚI để Spring Boot map sang property (SPRING_PROFILES_ACTIVE).
 # Giá trị phải là chuỗi có nháy kép. Chart từ chối số và boolean: YAML đổi 1000000 thành 1e+06, on thành true.
