@@ -1,0 +1,20 @@
+{{- /*
+Service ClusterIP: tên DNS ổn định <release>.<namespace>.svc, trỏ tới các pod đang Ready.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "app.fullname" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "app.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- range $name, $port := .Values.ports }}
+    - name: {{ $name }}
+      port: {{ $port }}
+      targetPort: {{ $name }}
+      protocol: TCP
+    {{- end }}

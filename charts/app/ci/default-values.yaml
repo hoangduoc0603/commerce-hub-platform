@@ -1,0 +1,9 @@
+# Biến thể mặc định: chỉ các value bắt buộc. CI chạy lint và kubeconform với file này.
+image:
+  repository: ghcr.io/hoangduoc0603/commerce-hub-hello
+  # Digest giả, chỉ để render. Bước 7 cài thật thì dùng digest thật.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi

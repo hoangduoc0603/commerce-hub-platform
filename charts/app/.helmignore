@@ -1,0 +1,11 @@
+# File không đưa vào gói khi helm package (cú pháp như .gitignore).
+.DS_Store
+.git/
+.gitignore
+.idea/
+.vscode/
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
