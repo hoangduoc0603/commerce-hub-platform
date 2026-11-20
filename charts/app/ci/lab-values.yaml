@@ -1,4 +1,4 @@
-# Biến thể giống values lab của hello trong gitops: 1 replica, 512Mi, heap 60%, có env và secretRevision.
+# Biến thể giống values lab của hello trong gitops: 1 replica, 512Mi, heap 60%, có env, secretRevision và HTTPRoute.
 replicaCount: 1
 image:
   repository: ghcr.io/hoangduoc0603/commerce-hub-hello
@@ -15,3 +15,7 @@ env:
   SPRING_PROFILES_ACTIVE: "lab"
   LOGGING_LEVEL_ROOT: "INFO"
 secretRevision: 1
+httpRoute:
+  enabled: true
+  hostnames:
+    - hello.lab.internal

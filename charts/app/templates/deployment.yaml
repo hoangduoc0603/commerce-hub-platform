@@ -1,5 +1,5 @@
 {{- /*
-Deployment của workload. Ticket 22 thêm trust bundle, ticket 27 thêm existingSecret.
+Deployment của workload. Ticket 27 thêm existingSecret.
 */ -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -54,10 +54,19 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
-          {{- if .Values.jvm.enabled }}
+          {{- /* Workload không chạy JVM trong dự án là Node (seller-web): trust đi qua NODE_EXTRA_CA_CERTS. */}}
+          {{- $nodeTrust := and .Values.trust.enabled (not .Values.jvm.enabled) }}
+          {{- if or .Values.jvm.enabled $nodeTrust }}
           env:
+            {{- if .Values.jvm.enabled }}
             - name: JAVA_TOOL_OPTIONS
               value: {{ include "app.javaToolOptions" . | quote }}
+            {{- end }}
+            {{- if $nodeTrust }}
+            {{- /* Chỉ root lab: biến này THÊM vào root có sẵn của Node, trỏ vào gói CA công khai sẽ tin lại root Node đã gỡ. */}}
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ include "app.trustDir" . }}/lab-root-ca.pem
+            {{- end }}
           {{- end }}
           {{- /* Trùng tên thì env thắng envFrom: ConfigMap không ghi đè được JAVA_TOOL_OPTIONS của chart. */}}
           {{- if .Values.env }}
@@ -109,7 +118,33 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.trust.enabled }}
+            - name: trust
+              mountPath: {{ include "app.trustDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: {{ .Values.tmp.sizeLimit }}
+        {{- if .Values.trust.enabled }}
+        {{- /*
+        Gộp hai ConfigMap do trust-manager chép vào namespace (gitops infra/lab-ca/bundles.yaml) vào một thư mục.
+        Một Bundle chỉ ghi được một key PEM nên phải hai nguồn. Không optional: thiếu ConfigMap thì pod kẹt
+        ContainerCreating, lỗi lộ ngay thay vì JVM lặng lẽ dùng cacerts. projected/configMap hợp PSS restricted.
+        Root đổi thì trust-manager cập nhật file, nhưng JVM và Node chỉ đọc lúc khởi động: phải restart pod.
+        */}}
+        - name: trust
+          projected:
+            sources:
+              - configMap:
+                  name: lab-trust
+                  items:
+                    - key: bundle.p12
+                      path: bundle.p12
+              - configMap:
+                  name: lab-root
+                  items:
+                    - key: ca.crt
+                      path: lab-root-ca.pem
+        {{- end }}

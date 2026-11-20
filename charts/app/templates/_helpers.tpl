@@ -67,8 +67,8 @@ app.serviceAccountName: tên SA mà pod dùng (bước 2 gọi trong Deployment)
 
 {{/*
 app.javaToolOptions: giá trị biến JAVA_TOOL_OPTIONS. jvm.extraOptions đứng đầu, cờ của chart đứng sau:
-JVM lấy giá trị xuất hiện sau cùng, nên values không ghi đè được cờ của chart. Ticket 22 nối thêm cờ truststore
-vào cuối danh sách theo cùng cách.
+JVM lấy giá trị xuất hiện sau cùng, nên values không ghi đè được cờ của chart, kể cả cờ truststore.
+Không đặt trustStorePassword: Bundle lab-trust để mật khẩu rỗng, trust-manager ghi PKCS12 không mã hóa (G0-07).
 */}}
 {{- define "app.javaToolOptions" -}}
 {{- $opts := list }}
@@ -77,5 +77,16 @@ vào cuối danh sách theo cùng cách.
 {{- end }}
 {{- $opts = append $opts (printf "-XX:MaxRAMPercentage=%v" .Values.jvm.maxRAMPercentage) }}
 {{- $opts = append $opts (printf "-XX:ActiveProcessorCount=%v" .Values.jvm.activeProcessorCount) }}
+{{- if .Values.trust.enabled }}
+{{- $opts = append $opts (printf "-Djavax.net.ssl.trustStore=%s/bundle.p12" (include "app.trustDir" .)) }}
+{{- $opts = append $opts "-Djavax.net.ssl.trustStoreType=PKCS12" }}
+{{- end }}
 {{- join " " $opts }}
+{{- end }}
+
+{{/*
+app.trustDir: thư mục mount trust bundle. Một chỗ cho volumeMount, cờ JVM và NODE_EXTRA_CA_CERTS.
+*/}}
+{{- define "app.trustDir" -}}
+/etc/trust
 {{- end }}
