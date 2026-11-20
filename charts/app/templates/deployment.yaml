@@ -1,0 +1,113 @@
+{{- /*
+Deployment của workload. Ticket 22 thêm trust bundle, ticket 27 thêm existingSecret.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "app.fullname" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- /* Rollout theo zero-downtime.md: thêm pod mới trước, chỉ tắt pod cũ khi pod mới đã available. */}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "app.labels" . | nindent 8 }}
+      {{- /* Annotation đổi thì pod template đổi, Deployment rollout. Cùng input thì cùng giá trị (Argo CD không OutOfSync). */}}
+      annotations:
+        {{- if .Values.env }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        commerce-hub/secret-revision: {{ .Values.secretRevision | quote }}
+    spec:
+      serviceAccountName: {{ include "app.serviceAccountName" . }}
+      {{- /* Không bơm biến <SERVICE>_PORT, <SERVICE>_SERVICE_HOST của mọi Service trong namespace vào pod. */}}
+      enableServiceLinks: false
+      {{- /* preStop 10 + shutdown web 20 + Kafka listener 20 + dự phòng. Hết hạn thì SIGKILL. */}}
+      terminationGracePeriodSeconds: 60
+      {{- /* Pod Security Standards "restricted" (helm-chart.md "Bảo mật pod"). Không mở qua values. */}}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.securityContext.runAsUser }}
+        runAsGroup: {{ .Values.securityContext.runAsGroup }}
+        fsGroup: {{ .Values.securityContext.runAsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: "{{ required "image.repository là bắt buộc, ví dụ ghcr.io/hoangduoc0603/commerce-hub-hello" .Values.image.repository }}@{{ required "image.digest là bắt buộc (sha256:...), CI ghi vào gitops" .Values.image.digest }}"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          {{- if .Values.jvm.enabled }}
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: {{ include "app.javaToolOptions" . | quote }}
+          {{- end }}
+          {{- /* Trùng tên thì env thắng envFrom: ConfigMap không ghi đè được JAVA_TOOL_OPTIONS của chart. */}}
+          {{- if .Values.env }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "app.fullname" . }}
+          {{- end }}
+          ports:
+            {{- range $name, $port := .Values.ports }}
+            - name: {{ $name }}
+              containerPort: {{ $port }}
+              protocol: TCP
+            {{- end }}
+          {{- /* API server và kubeconform không kiểm port tên "http" có tồn tại không, nên chart tự chặn. */}}
+          {{- $_ := required "ports.http là bắt buộc: probe trỏ vào cổng tên http" .Values.ports.http }}
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: {{ .Values.probes.startupFailureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          lifecycle:
+            {{- /* Chờ EndpointSlice, kube-proxy, Envoy gỡ pod khỏi danh sách trước khi app nhận SIGTERM. */}}
+            preStop:
+              sleep:
+                seconds: 10
+          {{- $memory := required "resources.requests.memory là bắt buộc, ví dụ 512Mi" .Values.resources.requests.memory }}
+          resources:
+            requests:
+              cpu: {{ required "resources.requests.cpu là bắt buộc, ví dụ 250m" .Values.resources.requests.cpu | quote }}
+              memory: {{ $memory | quote }}
+            limits:
+              memory: {{ $memory | quote }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmp.sizeLimit }}

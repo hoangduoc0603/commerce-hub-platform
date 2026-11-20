@@ -1,0 +1,88 @@
+# Giá trị mặc định của chart `app`. Mỗi service ghi đè trong gitops/envs/<env>/<service>/values.yaml.
+# Quy ước (helm-chart.md "Values và schema"): tên camelCase, comment bắt đầu bằng tên value.
+
+# nameOverride thay giá trị nhãn app.kubernetes.io/name. Rỗng thì dùng tên release (ví dụ hello).
+nameOverride: ""
+# fullnameOverride thay tên của mọi resource. Rỗng thì dùng tên release.
+fullnameOverride: ""
+# component là nhãn app.kubernetes.io/component: service, simulator, frontend...
+component: service
+
+image:
+  # image.repository là tên image không kèm tag, ví dụ ghcr.io/hoangduoc0603/commerce-hub-hello. Bắt buộc.
+  repository: ""
+  # image.digest là sha256:... do CI ghi vào gitops. Pod chạy theo digest. Bắt buộc.
+  digest: ""
+  # image.tag là git SHA, chỉ để đọc: chart ghi vào nhãn app.kubernetes.io/version, không dùng để kéo image.
+  tag: ""
+
+serviceAccount:
+  # serviceAccount.create tạo một ServiceAccount riêng cho release.
+  create: true
+  # serviceAccount.name đặt tên SA. Rỗng thì: create=true dùng tên release, create=false dùng SA "default".
+  name: ""
+  # serviceAccount.automountToken mount token gọi Kubernetes API vào pod. Service không gọi API nên tắt.
+  automountToken: false
+  # serviceAccount.annotations gắn thêm vào SA.
+  annotations: {}
+
+# replicaCount là số pod. Lab ghi đè thành 1 trong gitops (ADR-0004).
+replicaCount: 2
+
+# ports là các cổng của container: khóa là tên cổng (tối đa 15 ký tự), giá trị là số cổng.
+# Service mở đúng các cổng này với cùng số. Ghi đè một khóa thành null để bỏ cổng đó.
+ports:
+  # ports.http là cổng chính của ứng dụng (server.port của Spring Boot). Probe và HTTPRoute trỏ vào cổng này.
+  http: 8080
+  # ports.management là cổng Actuator (management.server.port). Chỉ mở trong cụm, cho Prometheus scrape.
+  management: 8081
+
+# resources.requests là phần CPU và memory scheduler giữ cho pod. Bắt buộc, không có mặc định chung.
+# Chart tự đặt limits.memory = requests.memory và không đặt limits.cpu (helm-chart.md "Tài nguyên và JVM").
+resources:
+  requests:
+    # resources.requests.cpu, ví dụ 250m (một phần tư CPU).
+    cpu: ""
+    # resources.requests.memory, ví dụ 512Mi. Cũng là ngưỡng container bị OOM kill.
+    memory: ""
+
+# securityContext chỉ cho đổi UID/GID. Phần còn lại của Pod Security "restricted" chart đặt cố định.
+securityContext:
+  # securityContext.runAsUser là UID chạy process, phải khác 0. Khớp USER 10001 trong Dockerfile service.
+  runAsUser: 10001
+  # securityContext.runAsGroup là GID chính của process, cũng dùng làm fsGroup cho volume.
+  runAsGroup: 10001
+
+# tmp là emptyDir mount vào /tmp, chỗ ghi duy nhất khi root filesystem chỉ đọc.
+tmp:
+  # tmp.sizeLimit là dung lượng tối đa. Ghi vượt thì kubelet evict pod.
+  sizeLimit: 256Mi
+
+# probes: mọi workload phải trả /livez và /readyz trên cổng http (zero-downtime.md "Probe").
+probes:
+  # probes.startupFailureThreshold x 5 s là thời gian khởi động tối đa trước khi pod bị khởi động lại.
+  # Mặc định 24 (120 s). Đo thời gian khởi động thật của service rồi chỉnh, không đoán.
+  startupFailureThreshold: 24
+
+# jvm: cờ JVM truyền qua biến JAVA_TOOL_OPTIONS (container-image.md), đổi heap không cần build lại image.
+jvm:
+  # jvm.enabled đặt JAVA_TOOL_OPTIONS. Tắt cho workload không chạy JVM (seller-web).
+  enabled: true
+  # jvm.maxRAMPercentage là phần trăm memory limit dành cho heap. Phần còn lại cho metaspace, thread stack...
+  # Lab đặt 60 cho container 512Mi (ticket 04); chốt lại sau khi đo RSS của hello.
+  maxRAMPercentage: 75
+  # jvm.activeProcessorCount là số CPU JVM nhìn thấy. Không có CPU limit nên mặc định JVM thấy cả node
+  # và tạo thread pool (GC, ForkJoinPool) theo số đó.
+  activeProcessorCount: 2
+  # jvm.extraOptions là cờ thêm, ví dụ "-Xlog:gc". Đặt trước cờ của chart nên không ghi đè được cờ của chart.
+  extraOptions: ""
+
+# env là cấu hình không bí mật: chart render thành ConfigMap, pod nạp bằng envFrom (ticket 21 Q1).
+# Khóa là tên biến môi trường, viết HOA_GẠCH_DƯỚI để Spring Boot map sang property (SPRING_PROFILES_ACTIVE).
+# Giá trị phải là chuỗi có nháy kép. Chart từ chối số và boolean: YAML đổi 1000000 thành 1e+06, on thành true.
+# Đổi một giá trị thì checksum/config đổi, pod được rollout lại. Rỗng thì không có ConfigMap.
+env: {}
+
+# secretRevision là số nguyên, tăng 1 trong cùng commit đổi SealedSecret của service (runbooks/sealing-key.md).
+# Chart chép vào annotation của pod, nên tăng số này thì pod rollout và đọc Secret mới.
+secretRevision: 0

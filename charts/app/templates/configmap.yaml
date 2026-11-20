@@ -1,0 +1,19 @@
+{{- /*
+ConfigMap từ values.env. Deployment nạp bằng envFrom và băm file này vào annotation checksum/config.
+*/ -}}
+{{- with .Values.env }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "app.fullname" $ }}
+  labels:
+    {{- include "app.labels" $ | nindent 4 }}
+data:
+  {{- range $key, $value := . }}
+  {{- /* YAML không nháy đổi kiểu ngầm: 1000000 thành 1e+06, on thành true, 010 thành 8. Chỉ nhận chuỗi. */}}
+  {{- if not (kindIs "string" $value) }}
+  {{- fail (printf "env.%s phải là chuỗi có nháy kép, ví dụ %s: \"...\" (Helm đọc được: %v)" $key $key $value) }}
+  {{- end }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,18 @@
+# Biến thể workload không chạy JVM, giống seller-web: không JAVA_TOOL_OPTIONS, không cổng Actuator.
+component: frontend
+image:
+  repository: ghcr.io/hoangduoc0603/commerce-hub-seller-web
+  # Digest giả, chỉ để render.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+ports:
+  http: 3000
+  management: null
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+jvm:
+  enabled: false

@@ -1,0 +1,17 @@
+# Biến thể giống values lab của hello trong gitops: 1 replica, 512Mi, heap 60%, có env và secretRevision.
+replicaCount: 1
+image:
+  repository: ghcr.io/hoangduoc0603/commerce-hub-hello
+  tag: 009be30
+  # Digest giả, chỉ để render.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+jvm:
+  maxRAMPercentage: 60
+env:
+  SPRING_PROFILES_ACTIVE: "lab"
+  LOGGING_LEVEL_ROOT: "INFO"
+secretRevision: 1
