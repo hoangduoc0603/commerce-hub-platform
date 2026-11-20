@@ -121,7 +121,7 @@ jobs:
     needs: check
     # Gọi lồng bằng đường dẫn đầy đủ ghim SHA, không dùng ./: trong workflow nằm giữa chuỗi, ./ trỏ về repo nào
     # chưa xác minh (G0-23 Q7). Sửa container-image.yml thì commit trước, rồi đổi SHA ở đây.
-    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@92e2f4c37319a1029978c7b07da3594e85de9125 # container-image của v0.2.1
+    uses: hoangduoc0603/commerce-hub-platform/.github/workflows/container-image.yml@4c130c17ef32a9de6d4ab1953c04f488a7b8cc1c # container-image của v0.2.1
     permissions:
       contents: read
       packages: write
