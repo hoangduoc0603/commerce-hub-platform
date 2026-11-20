@@ -21,12 +21,12 @@ metadata:
     {{- include "app.labels" . | nindent 4 }}
 spec:
   parentRefs:
-    {{- with .Values.httpRoute.parentRef }}
-    {{- /* sectionName chọn listener https; bỏ đi thì route thử gắn cả listener http, nơi chỉ namespace edge được gắn. */}}
-    - name: {{ .name }}
-      namespace: {{ .namespace }}
-      sectionName: {{ .sectionName }}
-    {{- end }}
+    {{- /* Thiếu một trường thì route không Accepted mà sync vẫn xanh, nên chặn lúc render (review G0-22). */}}
+    {{- $parent := required "httpRoute.parentRef là bắt buộc khi httpRoute.enabled" .Values.httpRoute.parentRef }}
+    - name: {{ required "httpRoute.parentRef.name là bắt buộc (Gateway edge)" $parent.name }}
+      namespace: {{ required "httpRoute.parentRef.namespace là bắt buộc (namespace edge)" $parent.namespace }}
+      {{- /* sectionName chọn listener https; bỏ đi thì route thử gắn cả listener http, nơi chỉ namespace edge được gắn. */}}
+      sectionName: {{ required "httpRoute.parentRef.sectionName là bắt buộc (listener https)" $parent.sectionName }}
   hostnames:
     {{- range .Values.httpRoute.hostnames }}
     - {{ . | quote }}
