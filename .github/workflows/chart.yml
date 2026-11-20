@@ -1,0 +1,174 @@
+# Kiểm và phát hành chart `app` (charts/app) lên GHCR dạng OCI: oci://ghcr.io/<owner>/charts/app.
+# PR: lint, render từng biến thể ci/*-values.yaml, kubeconform với schema Kubernetes 1.37.
+# Push vào main: kiểm như PR, rồi package và push nếu version trong Chart.yaml chưa có trên GHCR.
+# Chuẩn: docs/standards/helm-chart.md mục "Kiểm tra" và "Publish OCI" (repo docs); ADR-0017.
+# Quyết định: ticket G0-21 Q2 (publish theo version trong Chart.yaml), Q3 (workflow thường, không reusable).
+name: chart
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - charts/**
+      - .github/workflows/chart.yml
+  pull_request:
+    paths:
+      - charts/**
+      - .github/workflows/chart.yml
+  # Chạy tay để kiểm lại; không publish vì event_name không phải push.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cùng cách với ghcr-smoke.yml: PR hủy lần chạy cũ của cùng ref; push vào main mỗi lần một nhóm (run_id),
+# để lần push sau không hủy lần push đang chờ.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Ghim bản và sha256 của file tải về: một file bị thay trên server tải về sẽ làm bước cài fail.
+  # Dependabot không theo dõi được hai bản này; nâng tay cùng lúc với Helm trên máy (helm-chart.md).
+  HELM_VERSION: v4.3.2
+  HELM_SHA256: d1c0278d46beab79582d7e50f5b3dc206944ba8e577cde618513fd07daa53983
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  KUBERNETES_VERSION: 1.37.0
+  CHART_DIR: charts/app
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Không dùng Helm có sẵn trên runner: bản do image runner quyết định, có thể khác bản trên máy.
+      - name: Cài Helm và kubeconform
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "${tmp}/helm.tgz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${tmp}/helm.tgz" | sha256sum -c -
+          curl -fsSL -o "${tmp}/kubeconform.tgz" \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  ${tmp}/kubeconform.tgz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf "${tmp}/helm.tgz" -C "$tmp" linux-amd64/helm
+          install -m 0755 "${tmp}/linux-amd64/helm" "${HOME}/.local/bin/helm"
+          tar -xzf "${tmp}/kubeconform.tgz" -C "${HOME}/.local/bin" kubeconform
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+
+      # helm lint chạy ở lint mode và bỏ qua `required` (đo ở G0-21 bước 2), nên phải render bằng helm template.
+      - name: Lint và kubeconform từng biến thể ci/
+        run: |
+          set -euo pipefail
+          helm version --short
+          shopt -s nullglob
+          files=("${CHART_DIR}"/ci/*-values.yaml)
+          if (( ${#files[@]} == 0 )); then
+            echo "::error::Không có file ${CHART_DIR}/ci/*-values.yaml nào."
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "::group::${f}"
+            helm lint --strict "$CHART_DIR" -f "$f"
+            helm template ci "$CHART_DIR" -n ci -f "$f" \
+              | kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION"
+            echo "::endgroup::"
+          done
+
+      # Thay JSON schema tới G7: thiếu value bắt buộc thì render phải thất bại.
+      - name: Render không có values phải thất bại
+        # Bắt output bằng if, không dùng pipe: shell mặc định của Actions có pipefail, helm thoát mã khác 0
+        # sẽ làm cả pipe fail dù grep tìm thấy.
+        run: |
+          if out="$(helm template ci "$CHART_DIR" 2>&1)"; then
+            echo "::error::helm template không values lại thành công: required của image/resources đã mất."
+            exit 1
+          fi
+          if ! grep -q "là bắt buộc" <<<"$out"; then
+            echo "::error::helm template thất bại nhưng không phải do required: ${out}"
+            exit 1
+          fi
+          echo "Đúng như mong đợi: ${out}"
+
+  publish:
+    name: publish
+    needs: lint
+    # Chỉ push vào nhánh mặc định. So github.ref, không so ref_name (một tag tên "main" cũng có ref_name "main").
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cài Helm
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "${tmp}/helm.tgz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  ${tmp}/helm.tgz" | sha256sum -c -
+          mkdir -p "${HOME}/.local/bin"
+          tar -xzf "${tmp}/helm.tgz" -C "$tmp" linux-amd64/helm
+          install -m 0755 "${tmp}/linux-amd64/helm" "${HOME}/.local/bin/helm"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+
+      # Tên trên GHCR phải là chữ thường; owner trên GitHub có thể có chữ hoa.
+      - name: Đọc tên và version
+        id: meta
+        run: |
+          set -euo pipefail
+          name="$(helm show chart "$CHART_DIR" | yq -r .name)"
+          version="$(helm show chart "$CHART_DIR" | yq -r .version)"
+          {
+            echo "name=${name}"
+            echo "version=${version}"
+            echo "registry=oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Đăng nhập GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # Version đã push là bất biến (helm-chart.md "Publish OCI"): đã có thì fail, buộc tăng version trong PR.
+      # Chỉ đi tiếp khi registry trả "not found" (package có nhưng chưa có version này) hoặc 403 "denied"
+      # (package chưa từng tồn tại; GHCR trả 403 thay vì 404, đo 2026-11-20). Lỗi khác (mạng, 5xx) thì fail,
+      # để không push đè một version có thật chỉ vì lần kiểm bị lỗi.
+      - name: Kiểm version chưa có trên GHCR
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+        run: |
+          if out="$(helm show chart "${REGISTRY}/${NAME}" --version "$VERSION" 2>&1)"; then
+            echo "::error::${REGISTRY}/${NAME}:${VERSION} đã có trên GHCR. Tăng version trong Chart.yaml."
+            exit 1
+          fi
+          if ! grep -qE 'not found|denied' <<<"$out"; then
+            echo "::error::Không kiểm được version trên GHCR: ${out}"
+            exit 1
+          fi
+          echo "Chưa có ${VERSION}: ${out}"
+
+      - name: Package và push
+        env:
+          NAME: ${{ steps.meta.outputs.name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+        run: |
+          set -euo pipefail
+          helm package "$CHART_DIR" --destination dist
+          helm push "dist/${NAME}-${VERSION}.tgz" "$REGISTRY" 2>&1 | tee push.log
+          digest="$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -1)"
+          echo "Pushed \`${REGISTRY}/${NAME}:${VERSION}\` digest \`${digest}\`" >> "$GITHUB_STEP_SUMMARY"
