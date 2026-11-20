@@ -31,6 +31,8 @@ spec:
         commerce-hub/secret-revision: {{ .Values.secretRevision | quote }}
     spec:
       serviceAccountName: {{ include "app.serviceAccountName" . }}
+      {{- /* Đặt cả ở pod: khi serviceAccount.create=false pod dùng SA "default", vốn mặc định mount token. */}}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
       {{- /* Không bơm biến <SERVICE>_PORT, <SERVICE>_SERVICE_HOST của mọi Service trong namespace vào pod. */}}
       enableServiceLinks: false
       {{- /* preStop 10 + shutdown web 20 + Kafka listener 20 + dự phòng. Hết hạn thì SIGKILL. */}}

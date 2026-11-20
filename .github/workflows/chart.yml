@@ -8,9 +8,10 @@ name: chart
 on:
   push:
     branches: [main]
+    # Chỉ khi chart đổi: commit chỉ sửa workflow không tăng version, publish sẽ fail vì version đã có.
+    # Thay đổi workflow vẫn được kiểm ở PR.
     paths:
       - charts/**
-      - .github/workflows/chart.yml
   pull_request:
     paths:
       - charts/**
@@ -142,9 +143,9 @@ jobs:
         run: echo "$TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       # Version đã push là bất biến (helm-chart.md "Publish OCI"): đã có thì fail, buộc tăng version trong PR.
-      # Chỉ đi tiếp khi registry trả "not found" (package có nhưng chưa có version này) hoặc 403 "denied"
-      # (package chưa từng tồn tại; GHCR trả 403 thay vì 404, đo 2026-11-20). Lỗi khác (mạng, 5xx) thì fail,
-      # để không push đè một version có thật chỉ vì lần kiểm bị lỗi.
+      # Chỉ đi tiếp khi registry trả "not found". Đã đăng nhập thì GHCR trả "not found" cả khi package chưa từng
+      # tồn tại (lần publish đầu, 2026-11-20); 403 "denied" chỉ gặp khi gọi ẩn danh, nên ở đây là lỗi quyền.
+      # Lỗi khác (quyền, mạng, 5xx) thì fail, để không push đè một version có thật chỉ vì lần kiểm bị lỗi.
       - name: Kiểm version chưa có trên GHCR
         env:
           NAME: ${{ steps.meta.outputs.name }}
@@ -155,7 +156,7 @@ jobs:
             echo "::error::${REGISTRY}/${NAME}:${VERSION} đã có trên GHCR. Tăng version trong Chart.yaml."
             exit 1
           fi
-          if ! grep -qE 'not found|denied' <<<"$out"; then
+          if ! grep -q 'not found' <<<"$out"; then
             echo "::error::Không kiểm được version trên GHCR: ${out}"
             exit 1
           fi
