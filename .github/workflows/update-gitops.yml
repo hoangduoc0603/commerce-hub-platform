@@ -141,8 +141,27 @@ jobs:
                 echo "::error::${SOURCE_SHA} và ${current_tag} lệch nhánh (compare: ${status}); không ghi."
                 exit 1 ;;
             esac
-            # strenv giữ giá trị là chuỗi; yq tự thêm ngoặc kép khi chuỗi trông như số. Comment trong file giữ nguyên.
-            yq -i '.image.digest = strenv(DIGEST) | .image.tag = strenv(SOURCE_SHA)' "$file"
+            # Thay đúng hai dòng digest và tag trong khối image:, chép nguyên mọi dòng khác (dòng trống, comment).
+            # Không ghi bằng yq -i: yq 4.54.3 trên runner xóa mọi dòng trống của file (G0-24 bước 3; bản 4.54.1 thì
+            # giữ), mà yq có sẵn trên runner không ghim được phiên bản. yq chỉ còn dùng để đọc và kiểm.
+            # tag luôn trong ngoặc kép: SHA toàn chữ số kèm một chữ e (vd. 12345e67...) là số thực trong YAML.
+            awk -v digest="$DIGEST" -v tag="$SOURCE_SHA" '
+              /^[^ \t#]/ { in_image = ($0 ~ /^image:[ \t]*$/) }
+              in_image && /^  digest:/ { print "  digest: " digest; next }
+              in_image && /^  tag:/ { print "  tag: \"" tag "\""; next }
+              { print }
+            ' "$file" > "${file}.tmp"
+            mv "${file}.tmp" "$file"
+            # Kiểm kết quả trước khi commit: đọc lại đúng giá trị, và chỉ đúng hai dòng đổi. Lệch là dừng.
+            if [[ "$(yq '.image.digest' "$file")" != "$DIGEST" || "$(yq '.image.tag' "$file")" != "$SOURCE_SHA" ]]; then
+              echo "::error::Sửa ${file} không ra đúng digest và tag; khối image đã đổi cấu trúc?"
+              exit 1
+            fi
+            if [[ "$(git diff --numstat -- "$file")" != $'2\t2\t'"$file" ]]; then
+              git diff -- "$file"
+              echo "::error::Sửa ${file} đổi khác đúng hai dòng; không commit."
+              exit 1
+            fi
             git add "$file"
             git commit --quiet --file - <<EOF
           ${SERVICE}: ${ENVIRONMENT} chạy ${SOURCE_SHA:0:7}
