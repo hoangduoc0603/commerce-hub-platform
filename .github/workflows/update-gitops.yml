@@ -1,0 +1,175 @@
+# Reusable workflow: ghi image vừa build của một service vào repo gitops (envs/<env>/<service>/values.yaml), để Argo CD
+# tự kéo về. CI không giữ credential vào cụm, không gọi kubectl/argocd: ghi Git là việc duy nhất.
+# Chuẩn: docs/standards/ci-cd.md "Deploy qua GitOps", docs/standards/gitops-argocd.md "Cập nhật image" (repo docs).
+# Ticket G0-24.
+#
+# Bên gọi:
+#   - chỉ gọi trên push vào nhánh mặc định, sau khi image đã push (needs: job gọi java-service.yml);
+#   - cấp permissions: { contents: read } (đọc compare API của repo nguồn);
+#   - truyền client-id: ${{ vars.GITOPS_APP_CLIENT_ID }} và secrets: { app-private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }} }.
+name: update-gitops
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: Tên thư mục service trong envs/<environment>/ của gitops (ví dụ hello). File values phải có sẵn.
+        type: string
+        required: true
+      environment:
+        description: Môi trường trong gitops (envs/<environment>/).
+        type: string
+        default: lab
+      digest:
+        description: Digest sha256 của image vừa push (output digest của java-service.yml).
+        type: string
+        required: true
+      client-id:
+        description: Client ID của GitHub App ghi gitops. Không bí mật, bên gọi lấy từ vars.
+        type: string
+        required: true
+      gitops-repository:
+        description: Tên repo gitops, cùng owner với repo gọi.
+        type: string
+        default: commerce-hub-gitops
+      timeout-minutes:
+        description: Thời gian tối đa của job (phút).
+        type: number
+        default: 10
+    secrets:
+      app-private-key:
+        description: Private key của GitHub App ghi gitops.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: update-gitops
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    # Mỗi lúc một lần ghi cho mỗi môi trường. queue: max giữ tới 100 run chờ theo FIFO; mặc định (single) chỉ giữ MỘT
+    # run chờ, run thứ ba tới sẽ hủy run thứ hai và commit đó không bao giờ lên lab. cancel-in-progress phải false
+    # (đi với queue: max là lỗi validate). Docs ghi nhóm tính "in the repository": nhóm chỉ xếp hàng các run của
+    # CÙNG một service; hai service khác repo vẫn có thể push cùng lúc, nên vẫn cần vòng thử lại ở bước ghi.
+    # actionlint 1.7.12 chưa biết khóa queue: chạy với -ignore 'unexpected key "queue"'.
+    # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+    concurrency:
+      group: update-gitops-${{ inputs.environment }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      # Token installation chỉ cho repo gitops, chỉ quyền contents: write, sống tối đa 1 giờ và bị thu hồi ở bước post
+      # khi job xong. Không PAT (ci-cd.md, "Quyền và credential").
+      - name: Sinh token GitHub App
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ inputs.client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.gitops-repository }}
+          permission-contents: write
+
+      # Giữ credential (persist-credentials mặc định true) để bước ghi push được bằng token App.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.gitops-repository }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: gitops
+
+      # Commit đứng tên bot của App (<slug>[bot]), email noreply theo id của bot user. Mẫu từ README của
+      # create-github-app-token, mục "Configure Git CLI for an app's bot user". %5B %5D là [ ] đã mã hóa URL.
+      - name: Đặt tác giả commit là bot của App
+        working-directory: gitops
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          user_id="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+      - name: Ghi digest và tag vào values
+        working-directory: gitops
+        env:
+          # GITHUB_TOKEN của bên gọi (contents: read): chỉ dùng đọc compare API của repo nguồn.
+          GH_TOKEN: ${{ github.token }}
+          SERVICE: ${{ inputs.service }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DIGEST: ${{ inputs.digest }}
+          # Trong reusable workflow, context github là của bên gọi: repo và SHA của service.
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          # Input đi thẳng vào đường dẫn file và vào YAML: kiểm dạng trước khi dùng.
+          [[ "$SERVICE" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || { echo "::error::service không hợp lệ: ${SERVICE}"; exit 1; }
+          [[ "$ENVIRONMENT" =~ ^[a-z0-9-]+$ ]] || { echo "::error::environment không hợp lệ: ${ENVIRONMENT}"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::digest không hợp lệ: ${DIGEST}"; exit 1; }
+
+          file="envs/${ENVIRONMENT}/${SERVICE}/values.yaml"
+          # CI không được TẠO service: thêm file values là ApplicationSet sinh app mới. Thêm service là commit tay.
+          [[ -f "$file" ]] || { echo "::error::${file} chưa có trong gitops; tạo service bằng commit tay trước."; exit 1; }
+          branch="$(git branch --show-current)"
+
+          # Sửa values và commit trên trạng thái hiện tại của nhánh. Kết quả ghi vào biến changed thay vì mã trả về:
+          # gọi hàm trong điều kiện if thì bash tắt set -e cho cả thân hàm, lỗi của gh/yq sẽ bị nuốt.
+          apply_change() {
+            changed=false
+            local current_tag status
+            current_tag="$(yq '.image.tag' "$file")"
+            if [[ "$current_tag" == "$SOURCE_SHA" ]]; then
+              echo "::notice::${file} đã trỏ ${SOURCE_SHA}, không có gì để ghi."
+              return 0
+            fi
+            # Chặn ghi bản cũ hơn bản đang chạy (ticket G0-24, Q1): run xếp hàng theo lúc bắt đầu chờ, không theo
+            # thứ tự merge. ahead: SHA mới là con cháu của tag hiện tại. Tag hiện tại không có trong repo nguồn thì
+            # gh api trả 404 và job dừng: đừng ghi đè thứ không giải thích được.
+            status="$(gh api "repos/${SOURCE_REPO}/compare/${current_tag}...${SOURCE_SHA}" --jq .status)"
+            case "$status" in
+              ahead) ;;
+              behind)
+                echo "::notice::${SOURCE_SHA} cũ hơn ${current_tag} đang có trong ${file}; bỏ qua."
+                return 0 ;;
+              *)
+                echo "::error::${SOURCE_SHA} và ${current_tag} lệch nhánh (compare: ${status}); không ghi."
+                exit 1 ;;
+            esac
+            # strenv giữ giá trị là chuỗi; yq tự thêm ngoặc kép khi chuỗi trông như số. Comment trong file giữ nguyên.
+            yq -i '.image.digest = strenv(DIGEST) | .image.tag = strenv(SOURCE_SHA)' "$file"
+            git add "$file"
+            git commit --quiet --file - <<EOF
+          ${SERVICE}: ${ENVIRONMENT} chạy ${SOURCE_SHA:0:7}
+
+          Nguồn: ${SOURCE_REPO}@${SOURCE_SHA}
+          Image: ${DIGEST}
+          Run: ${RUN_URL}
+          EOF
+            changed=true
+          }
+
+          # Push bị từ chối khi service khác vừa ghi vào gitops. Không git pull --rebase: commit tới trước có thể sửa
+          # đúng những dòng này (vd. một git revert để rollback) và rebase sẽ xung đột. Thay vào đó lấy nhánh mới
+          # nhất rồi LÀM LẠI thay đổi, nên kiểm bản cũ hơn ở trên cũng chạy lại trên trạng thái mới nhất.
+          for attempt in 1 2 3 4 5; do
+            apply_change
+            if [[ "$changed" == false ]]; then
+              exit 0
+            fi
+            if git push --quiet origin "HEAD:${branch}"; then
+              echo "::notice::Đã ghi ${file}: $(git rev-parse HEAD)"
+              exit 0
+            fi
+            echo "::warning::Push bị từ chối (lần ${attempt}); lấy ${branch} mới nhất rồi làm lại."
+            sleep $((attempt * 2))
+            git fetch --quiet origin "$branch"
+            git reset --quiet --hard "origin/${branch}"
+          done
+          echo "::error::Không push được sau 5 lần."
+          exit 1
