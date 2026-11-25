@@ -57,6 +57,10 @@ pod kẹt CreateContainerConfigError: lỗi lộ ngay, không âm thầm rỗng.
 {{- define "app.secretEnv" -}}
 {{- $path := .path }}
 {{- range $envName, $ref := .map }}
+{{- /* Trùng tên thì Kubernetes lấy phần tử sau, ghi đè cờ JVM và truststore của chart (review G0-27). */}}
+{{- if has $envName (list "JAVA_TOOL_OPTIONS" "NODE_EXTRA_CA_CERTS") }}
+{{- fail (printf "%s.%s: biến này do chart đặt, không lấy từ Secret được" $path $envName) }}
+{{- end }}
 - name: {{ $envName }}
   valueFrom:
     secretKeyRef:

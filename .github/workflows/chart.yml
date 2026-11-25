@@ -105,6 +105,33 @@ jobs:
           fi
           echo "Đúng như mong đợi: ${out}"
 
+      # Bất biến của Job migrate và SealedSecret (review G0-27): kubeconform không thấy được các lỗi này.
+      - name: Bất biến Job migrate
+        run: |
+          set -euo pipefail
+          default="$(helm template ci "$CHART_DIR" -n ci -f "${CHART_DIR}/ci/default-values.yaml")"
+          if grep -q '^kind: Job$' <<<"$default"; then
+            echo "::error::Chart mặc định không được sinh Job migrate (migration.enabled mặc định false)."
+            exit 1
+          fi
+          job="$(helm template ci "$CHART_DIR" -n ci -f "${CHART_DIR}/ci/lab-values.yaml" -s templates/migration-job.yaml)"
+          svc="$(helm template ci "$CHART_DIR" -n ci -f "${CHART_DIR}/ci/lab-values.yaml" -s templates/service.yaml)"
+          # Pod migrate không có readinessProbe nên Ready ngay: nhãn của nó không được khớp selector của Service.
+          if [ "$(yq '.spec.template.metadata.labels["app.kubernetes.io/name"]' <<<"$job")" = "$(yq '.spec.selector["app.kubernetes.io/name"]' <<<"$svc")" ]; then
+            echo "::error::Nhãn pod migrate khớp selector của Service: Service sẽ gửi request vào pod migrate."
+            exit 1
+          fi
+          # TTL có thể xóa Job trước khi Argo CD đọc kết quả; SA do chart tạo chưa có lúc PreSync của lần sync đầu.
+          yq -e '.spec.ttlSecondsAfterFinished == null and .spec.template.spec.serviceAccountName == "default"' <<<"$job" >/dev/null \
+            || { echo "::error::Job migrate có ttlSecondsAfterFinished hoặc dùng ServiceAccount do chart tạo."; exit 1; }
+          for bad in "sealedSecrets.x.preSync=false" "secretEnv.JAVA_TOOL_OPTIONS.secret=x"; do
+            if helm template ci "$CHART_DIR" -f "${CHART_DIR}/ci/lab-values.yaml" --set-string "$bad" --set sealedSecrets.x.encryptedData.k=Ag --set secretEnv.JAVA_TOOL_OPTIONS.key=k >/dev/null 2>&1; then
+              echo "::error::helm template phải từ chối ${bad}."
+              exit 1
+            fi
+          done
+          echo "Đúng: không Job khi tắt, nhãn tách khỏi Service, không TTL, SA default, chặn preSync chuỗi và secretEnv trùng biến chart."
+
   publish:
     name: publish
     needs: lint

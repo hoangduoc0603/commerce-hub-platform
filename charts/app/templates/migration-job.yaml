@@ -32,7 +32,12 @@ spec:
     spec:
       {{- /* Never: lỗi thì Job tạo pod mới (đếm vào backoffLimit), pod lỗi còn lại để đọc log. */}}
       restartPolicy: Never
-      serviceAccountName: {{ include "app.serviceAccountName" . }}
+      {{- /*
+      ServiceAccount do chart tạo là resource thường ở phase Sync, tức chưa có khi hook PreSync chạy ở lần sync đầu
+      của service mới: pod bị từ chối (serviceaccount not found), Job treo tới activeDeadlineSeconds (review G0-27).
+      Job không gọi Kubernetes API nên dùng SA "default" (namespace nào cũng có). SA có sẵn (create=false) thì dùng nó.
+      */}}
+      serviceAccountName: {{ ternary "default" (include "app.serviceAccountName" .) .Values.serviceAccount.create }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
       enableServiceLinks: false
       securityContext:
@@ -50,6 +55,8 @@ spec:
           env:
             {{- with (include "app.runtimeEnv" . | trim) }}{{ . | nindent 12 }}{{ end }}
             {{- range $key, $value := $m.env }}
+            {{- /* null: gỡ key mặc định (Helm chỉ gỡ được key của map mặc định bằng null), ví dụ SPRING_PROFILES_ACTIVE cho app Node. */}}
+            {{- if kindIs "invalid" $value }}{{ continue }}{{ end }}
             {{- if not (kindIs "string" $value) }}
             {{- fail (printf "migration.env.%s phải là chuỗi có nháy kép (Helm đọc được: %v)" $key $value) }}
             {{- end }}
