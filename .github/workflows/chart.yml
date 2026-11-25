@@ -39,8 +39,9 @@ env:
   KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
   KUBERNETES_VERSION: 1.37.0
   CHART_DIR: charts/app
-  # Schema của kind từ CRD (HTTPRoute, Gateway API v1.6.1) sinh sẵn trong repo; nguồn và cách sinh lại ở
-  # kubeconform-schemas/README.md. Không dùng -ignore-missing-schemas (helm-chart.md "Kiểm tra", G0-22).
+  # Schema của kind từ CRD (HTTPRoute của Gateway API v1.6.1, SealedSecret của Sealed Secrets 0.41.2) sinh sẵn trong
+  # repo; nguồn và cách sinh lại ở kubeconform-schemas/README.md. Không dùng -ignore-missing-schemas (helm-chart.md
+  # "Kiểm tra", G0-22).
   CRD_SCHEMA_LOCATION: kubeconform-schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
 
 jobs:

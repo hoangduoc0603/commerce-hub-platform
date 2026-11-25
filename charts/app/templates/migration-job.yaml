@@ -1,0 +1,73 @@
+{{- /*
+Job migrate: hook PreSync của Argo CD (ticket 27; db-migration.md "Chạy migration ở đâu", gitops-argocd.md
+"Sync waves, hooks, health"). Chạy CHÍNH image của bản sắp deploy (cùng digest) ở profile migrate rồi thoát.
+Job Failed thì Argo CD dừng sync: Deployment, ConfigMap... của bản mới không được áp, pod cũ tiếp tục phục vụ.
+Chỉ Argo CD chạy hook này; `helm install` tay thì Job thành resource thường, không có thứ tự.
+*/ -}}
+{{- if .Values.migration.enabled }}
+{{- $m := .Values.migration }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  {{- /* Tên cố định (không generateName): BeforeHookCreation xóa Job cũ rồi tạo lại, luôn còn Job gần nhất để đọc log. */}}
+  name: {{ include "app.migrationName" . }}
+  labels:
+    {{- include "app.migrationLabels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    {{- /* Không dùng HookSucceeded: Job thành công cũng giữ lại tới lần sync sau để xem log. */}}
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    {{- /* Sau SealedSecret hook của migrator (wave -1): Argo CD chờ wave trước Healthy rồi mới chạy wave này. */}}
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  {{- /* Số lần tạo lại pod khi lỗi (ví dụ lock timeout). Argo CD còn retry cả sync, nên giữ nhỏ. */}}
+  backoffLimit: {{ $m.backoffLimit }}
+  {{- /* Trần thời gian cả Job, thắng backoffLimit. Chặn Job treo vô hạn (JVM không thoát, chờ khóa không timeout). */}}
+  activeDeadlineSeconds: {{ $m.activeDeadlineSeconds }}
+  {{- /* KHÔNG đặt ttlSecondsAfterFinished: Kubernetes có thể xóa Job trước khi Argo CD đọc kết quả. */}}
+  template:
+    metadata:
+      labels:
+        {{- include "app.migrationLabels" . | nindent 8 }}
+    spec:
+      {{- /* Never: lỗi thì Job tạo pod mới (đếm vào backoffLimit), pod lỗi còn lại để đọc log. */}}
+      restartPolicy: Never
+      serviceAccountName: {{ include "app.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      enableServiceLinks: false
+      securityContext:
+        {{- include "app.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "app.image" . | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            {{- include "app.containerSecurityContext" . | nindent 12 }}
+          {{- /*
+          Không nạp ConfigMap của runtime (values.env): Job là một chương trình khác, cấu hình riêng ở migration.env.
+          Nạp chung thì SPRING_DATASOURCE_URL (Pooler) của runtime sẽ thắng giá trị trong application-migrate.yaml.
+          */}}
+          env:
+            {{- with (include "app.runtimeEnv" . | trim) }}{{ . | nindent 12 }}{{ end }}
+            {{- range $key, $value := $m.env }}
+            {{- if not (kindIs "string" $value) }}
+            {{- fail (printf "migration.env.%s phải là chuỗi có nháy kép (Helm đọc được: %v)" $key $value) }}
+            {{- end }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- with (include "app.secretEnv" (dict "map" $m.secretEnv "path" "migration.secretEnv") | trim) }}{{ . | nindent 12 }}{{ end }}
+          {{- /* Mặc định cùng resources với runtime: cùng JVM, cùng MaxRAMPercentage. */}}
+          {{- $resources := .Values.resources }}
+          {{- $resourcesPath := "resources" }}
+          {{- with $m.resources }}
+          {{- $resources = . }}
+          {{- $resourcesPath = "migration.resources" }}
+          {{- end }}
+          resources:
+            {{- include "app.resources" (dict "resources" $resources "path" $resourcesPath) | nindent 12 }}
+          volumeMounts:
+            {{- include "app.volumeMounts" . | nindent 12 }}
+      volumes:
+        {{- include "app.volumes" . | nindent 8 }}
+{{- end }}

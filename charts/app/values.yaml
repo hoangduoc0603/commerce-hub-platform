@@ -112,6 +112,39 @@ trust:
 # Đổi một giá trị thì checksum/config đổi, pod được rollout lại. Rỗng thì không có ConfigMap.
 env: {}
 
+# sealedSecrets: SealedSecret do chart render (gitops-argocd.md "Secret"). Khóa là tên Secret, phải TRÙNG tên lúc
+# chạy kubeseal (scope strict gắn tên và namespace vào bản mã). Lệnh seal: docs/runbooks/pg-main-them-service.md.
+# Ví dụ:
+#   hello-db-migrator:
+#     type: kubernetes.io/basic-auth   # trùng type lúc seal; mặc định Opaque
+#     preSync: true                    # thành hook PreSync wave -1, có trước Job migrate; xóa khi sync thành công
+#     encryptedData: {username: Ag..., password: Ag...}
+sealedSecrets: {}
+
+# secretEnv: biến môi trường lấy từ một key của Secret (secretKeyRef). Khóa là tên biến. Secret có thể do
+# sealedSecrets tạo hoặc có sẵn trong namespace. Ví dụ:
+#   SPRING_DATASOURCE_PASSWORD: {secret: hello-db-app, key: password}
+secretEnv: {}
+
 # secretRevision là số nguyên, tăng 1 trong cùng commit đổi SealedSecret của service (runbooks/sealing-key.md).
 # Chart chép vào annotation của pod, nên tăng số này thì pod rollout và đọc Secret mới.
 secretRevision: 0
+
+# migration: Job migrate là hook PreSync của Argo CD (db-migration.md "Chạy migration ở đâu"). Chạy cùng image và
+# digest với Deployment, thoát 0 khi xong. Job lỗi thì sync dừng, Deployment giữ bản cũ.
+migration:
+  # migration.enabled sinh Job. Chỉ bật khi image đã có chế độ migrate-only (Spring: profile migrate); bật với image
+  # chưa có thì app khởi động web server, không bao giờ thoát, Job treo tới activeDeadlineSeconds.
+  enabled: false
+  # migration.env: biến môi trường của Job (không phải secret), giá trị là chuỗi có nháy. Job KHÔNG nạp values.env.
+  # Ghi đè từng khóa trong gitops, ví dụ SPRING_FLYWAY_URL.
+  env:
+    SPRING_PROFILES_ACTIVE: "migrate"
+  # migration.secretEnv: như secretEnv, cho credential của role migrate (SealedSecret preSync: true).
+  secretEnv: {}
+  # migration.backoffLimit: số lần tạo lại pod khi lỗi. Argo CD retry cả sync nên giữ nhỏ (db-migration.md).
+  backoffLimit: 2
+  # migration.activeDeadlineSeconds: trần thời gian của cả Job, kể cả các lần thử lại.
+  activeDeadlineSeconds: 600
+  # migration.resources: rỗng thì dùng resources của runtime.
+  resources: {}

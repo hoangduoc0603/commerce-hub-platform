@@ -1,4 +1,5 @@
-# Biến thể giống values lab của hello trong gitops: 1 replica, 512Mi, heap 60%, có env, secretRevision và HTTPRoute.
+# Biến thể giống values lab của hello trong gitops: 1 replica, 512Mi, heap 60%, có env, secretRevision, HTTPRoute,
+# SealedSecret (thường và hook PreSync), secretEnv và Job migrate.
 replicaCount: 1
 image:
   repository: ghcr.io/hoangduoc0603/commerce-hub-hello
@@ -19,3 +20,34 @@ httpRoute:
   enabled: true
   hostnames:
     - hello.lab.internal
+# Bản mã giả: chỉ để render và kiểm schema. Một Secret thường cho runtime, một hook cho Job migrate.
+sealedSecrets:
+  hello-db-app:
+    type: kubernetes.io/basic-auth
+    encryptedData:
+      username: AgFAKE
+      password: AgFAKE
+  hello-db-migrator:
+    type: kubernetes.io/basic-auth
+    preSync: true
+    encryptedData:
+      username: AgFAKE
+      password: AgFAKE
+secretEnv:
+  SPRING_DATASOURCE_USERNAME:
+    secret: hello-db-app
+    key: username
+  SPRING_DATASOURCE_PASSWORD:
+    secret: hello-db-app
+    key: password
+migration:
+  enabled: true
+  env:
+    SPRING_FLYWAY_URL: "jdbc:postgresql://pg-main-rw.postgres.svc:5432/hello?sslmode=require"
+  secretEnv:
+    SPRING_FLYWAY_USER:
+      secret: hello-db-migrator
+      key: username
+    SPRING_FLYWAY_PASSWORD:
+      secret: hello-db-migrator
+      key: password
