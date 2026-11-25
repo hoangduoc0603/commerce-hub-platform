@@ -90,3 +90,28 @@ app.trustDir: thư mục mount trust bundle. Một chỗ cho volumeMount, cờ J
 {{- define "app.trustDir" -}}
 /etc/trust
 {{- end }}
+
+{{/*
+app.migrationName: tên Job migrate. Cắt fullname còn 55 ký tự để cả tên (và nhãn job-name Kubernetes tự gắn) không
+vượt 63.
+*/}}
+{{- define "app.migrationName" -}}
+{{- printf "%s-migrate" (include "app.fullname" . | trunc 55 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
+app.migrationLabels: nhãn của Job và pod migrate. name KHÁC app.selectorLabels: Service chọn pod theo name + instance,
+pod migrate không có readinessProbe nên Ready ngay khi chạy; trùng nhãn thì Service gửi request vào pod không có web
+server. Selector của Deployment không đổi được nên phân biệt bằng name.
+*/}}
+{{- define "app.migrationLabels" -}}
+helm.sh/chart: {{ include "app.chart" . }}
+app.kubernetes.io/name: {{ printf "%s-migrate" (include "app.name" . | trunc 55 | trimSuffix "-") }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/component: migration
+app.kubernetes.io/part-of: commerce-hub
+{{- with .Values.image.tag }}
+app.kubernetes.io/version: {{ . | trunc 63 | trimSuffix "-" | quote }}
+{{- end }}
+{{- end }}

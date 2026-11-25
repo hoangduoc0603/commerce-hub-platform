@@ -1,5 +1,5 @@
 {{- /*
-Deployment của workload. Ticket 27 thêm existingSecret.
+Deployment của workload. Biến môi trường từ Secret qua secretEnv (ticket 27).
 */ -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -39,34 +39,20 @@ spec:
       terminationGracePeriodSeconds: 60
       {{- /* Pod Security Standards "restricted" (helm-chart.md "Bảo mật pod"). Không mở qua values. */}}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: {{ .Values.securityContext.runAsUser }}
-        runAsGroup: {{ .Values.securityContext.runAsGroup }}
-        fsGroup: {{ .Values.securityContext.runAsGroup }}
-        seccompProfile:
-          type: RuntimeDefault
+        {{- include "app.podSecurityContext" . | nindent 8 }}
       containers:
         - name: app
-          image: "{{ required "image.repository là bắt buộc, ví dụ ghcr.io/hoangduoc0603/commerce-hub-hello" .Values.image.repository }}@{{ required "image.digest là bắt buộc (sha256:...), CI ghi vào gitops" .Values.image.digest }}"
+          image: {{ include "app.image" . | quote }}
           imagePullPolicy: IfNotPresent
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          {{- /* Workload không chạy JVM trong dự án là Node (seller-web): trust đi qua NODE_EXTRA_CA_CERTS. */}}
-          {{- $nodeTrust := and .Values.trust.enabled (not .Values.jvm.enabled) }}
-          {{- if or .Values.jvm.enabled $nodeTrust }}
+            {{- include "app.containerSecurityContext" . | nindent 12 }}
+          {{- $runtimeEnv := include "app.runtimeEnv" . | trim }}
+          {{- /* Đổi nội dung Secret không làm pod rollout: tăng secretRevision trong cùng commit. */}}
+          {{- $secretEnv := include "app.secretEnv" (dict "map" .Values.secretEnv "path" "secretEnv") | trim }}
+          {{- if or $runtimeEnv $secretEnv }}
           env:
-            {{- if .Values.jvm.enabled }}
-            - name: JAVA_TOOL_OPTIONS
-              value: {{ include "app.javaToolOptions" . | quote }}
-            {{- end }}
-            {{- if $nodeTrust }}
-            {{- /* Chỉ root lab: biến này THÊM vào root có sẵn của Node, trỏ vào gói CA công khai sẽ tin lại root Node đã gỡ. */}}
-            - name: NODE_EXTRA_CA_CERTS
-              value: {{ include "app.trustDir" . }}/lab-root-ca.pem
-            {{- end }}
+            {{- with $runtimeEnv }}{{ . | nindent 12 }}{{ end }}
+            {{- with $secretEnv }}{{ . | nindent 12 }}{{ end }}
           {{- end }}
           {{- /* Trùng tên thì env thắng envFrom: ConfigMap không ghi đè được JAVA_TOOL_OPTIONS của chart. */}}
           {{- if .Values.env }}
@@ -108,43 +94,9 @@ spec:
             preStop:
               sleep:
                 seconds: 10
-          {{- $memory := required "resources.requests.memory là bắt buộc, ví dụ 512Mi" .Values.resources.requests.memory }}
           resources:
-            requests:
-              cpu: {{ required "resources.requests.cpu là bắt buộc, ví dụ 250m" .Values.resources.requests.cpu | quote }}
-              memory: {{ $memory | quote }}
-            limits:
-              memory: {{ $memory | quote }}
+            {{- include "app.resources" (dict "resources" .Values.resources "path" "resources") | nindent 12 }}
           volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            {{- if .Values.trust.enabled }}
-            - name: trust
-              mountPath: {{ include "app.trustDir" . }}
-              readOnly: true
-            {{- end }}
+            {{- include "app.volumeMounts" . | nindent 12 }}
       volumes:
-        - name: tmp
-          emptyDir:
-            sizeLimit: {{ .Values.tmp.sizeLimit }}
-        {{- if .Values.trust.enabled }}
-        {{- /*
-        Gộp hai ConfigMap do trust-manager chép vào namespace (gitops infra/lab-ca/bundles.yaml) vào một thư mục.
-        Một Bundle chỉ ghi được một key PEM nên phải hai nguồn. Không optional: thiếu ConfigMap thì pod kẹt
-        ContainerCreating, lỗi lộ ngay thay vì JVM lặng lẽ dùng cacerts. projected/configMap hợp PSS restricted.
-        Root đổi thì trust-manager cập nhật file, nhưng JVM và Node chỉ đọc lúc khởi động: phải restart pod.
-        */}}
-        - name: trust
-          projected:
-            sources:
-              - configMap:
-                  name: lab-trust
-                  items:
-                    - key: bundle.p12
-                      path: bundle.p12
-              - configMap:
-                  name: lab-root
-                  items:
-                    - key: ca.crt
-                      path: lab-root-ca.pem
-        {{- end }}
+        {{- include "app.volumes" . | nindent 8 }}
