@@ -10,7 +10,7 @@ Workflow `chart.yml` tìm schema theo `-schema-location default -schema-location
 | `bitnami.com/sealedsecret_v1alpha1.json` | Sealed Secrets 0.41.2, file vendor `gitops/infra/sealed-secrets/upstream/sealedsecrets-crd.yaml` | `6ccc74ae40a65ec4a1ab95baaf34b0beef0591d343fe3aea1104a36a4f283fab` |
 | `monitoring.coreos.com/servicemonitor_v1.json` | Prometheus Operator 0.95.2 (kube-prometheus-stack 94.1.0), file vendor `gitops/infra/kube-prometheus-stack/upstream/monitoring.coreos.com_servicemonitors.yaml` | `373fabaf6f5b68c5a155fa94486d4e8a2863c4aa6478b066a62d0767cd86ab1f` |
 
-Chỉ giữ schema của kind mà chart sinh ra. `httproute_v1.json` sinh ngày 2026-11-20 (G0-22), `sealedsecret_v1alpha1.json` ngày 2026-11-25 (G0-27, PyYAML 6.0.4), `servicemonitor_v1.json` ngày 2026-11-28 (G0-30, PyYAML 6.0.4), cùng bằng `scripts/openapi2jsonschema.py` của kubeconform v0.8.0 (sha256 `d145babfbb765004030764e1b4e518bfb7a4bd7f111691a08fa57983b81881f3`), PyYAML 6.0.3. Script thêm `additionalProperties: false` cho mọi object, nên `-strict` bắt được field gõ sai.
+Chỉ giữ schema của kind mà chart sinh ra. Cả ba file sinh bằng `scripts/openapi2jsonschema.py` của kubeconform v0.8.0 (sha256 `d145babfbb765004030764e1b4e518bfb7a4bd7f111691a08fa57983b81881f3`): `httproute_v1.json` ngày 2026-11-20 (G0-22, PyYAML 6.0.3), `sealedsecret_v1alpha1.json` ngày 2026-11-25 (G0-27, PyYAML 6.0.4), `servicemonitor_v1.json` ngày 2026-11-28 (G0-30, PyYAML 6.0.4). Script thêm `additionalProperties: false` cho mọi object, nên `-strict` bắt được field gõ sai.
 
 ## Sinh lại khi nâng Gateway API
 

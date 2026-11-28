@@ -1,4 +1,4 @@
-// Chi phí tracing của hello (G0-30 bước 11, observability.md "Kiểm chứng": chi phí tracing).
+// Chi phí tracing của hello (G0-30 bước 11; observability.md mục "Bằng chứng cần có", dòng "Chi phí tracing").
 // Tạo lời chào (JWT thật + INSERT qua PgBouncer) với tốc độ cố định, mỗi request mang traceparent cờ SAMPLED:
 //   SAMPLED=01: span được sample (sampler parent-based theo bên gọi) → tạo span, exemplar, gửi OTLP tới Collector.
 //   SAMPLED=00: không sample → span không ghi, không gửi; chi phí còn lại là đọc header và tạo context.
