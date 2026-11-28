@@ -4,15 +4,16 @@ Hạ tầng và công cụ dùng chung cho mọi repo của commerce-hub.
 
 | Thư mục | Dùng cho |
 |---|---|
-| `compose/` | Docker Compose dựng hạ tầng chạy local (PostgreSQL, Kafka, Schema Registry, Keycloak, ...) |
+| `compose/` | Docker Compose cho vòng dev trên Mac: PostgreSQL, PgBouncer, Keycloak (realm đọc từ checkout `../gitops`), Kafka, profile `obs` với `grafana/otel-lgtm`. Cách dùng và chỗ lệch lab: [`compose/README.md`](compose/README.md) |
 | `kind/` | Cấu hình cụm kind và add-on |
 | `kubeconform-schemas/` | Schema JSON của kind từ CRD (`HTTPRoute`, `SealedSecret`) cho kubeconform trong `chart.yml` |
 | `charts/` | Helm chart dùng chung `app` cho mọi workload (service, `marketplace-sim`, `seller-web`), publish lên OCI registry (theo ticket 11 trong `docs/.scratch/architecture-g0-g1/`) |
 | `docs/` | Hướng dẫn dựng hạ tầng (homelab Hyper-V) |
+| `scripts/compose-image-drift.sh` | So major.minor image giữa `compose/` và `gitops`; workflow `compose-image-drift.yml` chạy hằng ngày |
 | `scripts/github/` | Tạo và kiểm repo GitHub theo chuẩn repo public (`repo-bootstrap.sh`, `repo-audit.sh`) |
 | `.github/workflows/` | Reusable workflow cho CI của các repo (mục [Reusable workflow](#reusable-workflow)) và workflow thử của chính repo này |
 
-Cụm chạy chính là cụm Kubernetes home lab (kubeadm trên Hyper-V ở máy bàn, truy cập từ MacBook qua Tailscale, context `kubectl` là `homelab`). Kafka, PostgreSQL, Redis, OpenSearch chạy trong cụm này. Cách dựng xem [`docs/homelab-hyperv.md`](docs/homelab-hyperv.md). `compose/` và `kind/` chỉ dùng khi cần chạy thử nhanh trên MacBook.
+Cụm chạy chính là cụm Kubernetes home lab (kubeadm trên Hyper-V ở máy bàn, truy cập từ MacBook qua Tailscale, context `kubectl` là `homelab`). Kafka, PostgreSQL, Redis, OpenSearch chạy trong cụm này. Cách dựng xem [`docs/homelab-hyperv.md`](docs/homelab-hyperv.md). `compose/` là hạ tầng của vòng code trên MacBook (Mac không ghi vào lab); `kind/` chỉ dùng khi gỡ lỗi chart.
 
 ## Chart `app`
 

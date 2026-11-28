@@ -1,0 +1,219 @@
+# Hạ tầng cho vòng dev trên Mac (G0-32, ticket 13 của map kiến trúc). Service chạy trên host bằng profile `local`, không
+# chạy trong compose (image service chỉ có linux/amd64). Cách dùng và các chỗ lệch lab: README.md cạnh file này.
+#
+# Mức chuẩn: tối thiểu (CLAUDE.md, mục "Chuẩn production"): mặc định của image, ghim phiên bản, ghi chỗ lệch tại chỗ.
+# Phiên bản: cùng major.minor với lab (gitops). PgBouncer, Keycloak, keycloak-config-cli ghim đúng tag và digest của lab;
+# Postgres cùng bản 18.7 nhưng là image chính thức (lab: image CNPG, lý do ở service postgres). Job compose-image-drift
+# (platform/.github/workflows/) đỏ khi major.minor lệch.
+# Digest là image index (amd64 + arm64), tra bằng `docker buildx imagetools inspect <image>:<tag>` ngày 2026-11-29.
+#
+# Mọi cổng chỉ nghe 127.0.0.1: DB và Keycloak có mật khẩu dev, không mở cho máy khác trong mạng.
+# Cổng host dải 1xxxx (15432, 16432, 18080, 19092) thay cho cổng chuẩn: port-forward tới lab hay chiếm cổng chuẩn
+# (kubectl port-forward pg-main 5432, Keycloak admin 8180). Trùng cổng thì service trên Mac có thể nối nhầm vào lab,
+# trái nguyên tắc "Mac không ghi vào lab" (ticket 13 của map); khác dải thì không nhầm được.
+name: commerce-hub
+
+services:
+  # PostgreSQL 18.7 như pg-main (gitops/infra/pg-main/cluster.yaml). Image chính thức, không phải image CNPG: entrypoint
+  # của image chính thức chạy /docker-entrypoint-initdb.d lúc khởi tạo, thay cho CR DatabaseRole/Database của lab.
+  postgres:
+    image: postgres:18.7-trixie@sha256:64c8b0d31e4ab6ea665e8426ea406a94bf52de3c05b3a4a8bf713704eefa9328
+    environment:
+      # Superuser "postgres", chỉ dùng cho initdb và để xem DB từ host. Service không dùng role này.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?thiếu POSTGRES_PASSWORD, chạy cp .env.example .env}
+    # pg_hba giống lab: mỗi role LOGIN chỉ vào database của nó, còn lại reject (lý do ở postgres/pg_hba.conf).
+    # shared_buffers như pg-main; các tham số khác để mặc định như lab.
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "shared_buffers=256MB"]
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      # Image 18+ đặt PGDATA ở /var/lib/postgresql/18/docker và khai VOLUME /var/lib/postgresql (đổi từ 18, docs image).
+      - pgdata:/var/lib/postgresql
+      # Chỉ chạy khi volume rỗng (lần up đầu, hoặc sau down -v). Sửa file ở đây thì phải down -v mới có hiệu lực.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 1s
+
+  # PgBouncer transaction như Pooler pg-main-pooler-rw (gitops/infra/pg-main/pooler.yaml), cùng image, cùng digest.
+  # Runtime của service đi qua đây (host 16432); Flyway nối thẳng postgres (host 15432), như Job migrate trên lab.
+  pgbouncer:
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.25.2-202609221033-trixie@sha256:b15c428057d1ffbc19fb70496911a5f1a47066dcc1315bf794f4e85ade29e2e5
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:16432:6432"
+    volumes:
+      # Image chạy "pgbouncer /etc/pgbouncer/pgbouncer.ini" bằng user pgbouncer (uid 998): file cần quyền đọc cho người khác.
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+
+  # Keycloak như CR Keycloak của lab (gitops/infra/keycloak/keycloak.yaml): cùng image, cùng digest, DB PostgreSQL riêng.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    # `start` (chế độ production) như lab (startOptimized: false, tự build lúc khởi động), không `start-dev`: start-dev
+    # dùng H2 và tắt cache theme, khác lab ở chính chỗ Keycloak lưu realm.
+    command: ["start"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      # Khớp postgres/initdb/10-keycloak.sql.
+      KC_DB_PASSWORD: keycloak_local
+      # Như poolMaxSize của lab (keycloak.md hạ từ mặc định 100), cũng là CONNECTION LIMIT của role keycloak.
+      KC_DB_POOL_MAX_SIZE: "20"
+      # LỆCH LAB: HTTP thuần, hostname động. Lab: hostname https://auth.lab.internal sau Gateway edge có TLS.
+      # Hostname động nghĩa là issuer lấy theo request: token xin qua http://localhost:18080 có
+      # iss http://localhost:18080/realms/commerce-hub, đúng địa chỉ mà hello (profile local) kiểm.
+      # Realm có sslRequired: external; request từ host tới qua gateway của Docker (địa chỉ riêng) nên HTTP vẫn được nhận.
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      # /health/ready trên cổng management 9000 cho healthcheck bên dưới (không mở ra host).
+      KC_HEALTH_ENABLED: "true"
+      # Admin tạm của realm master, tạo một lần khi DB rỗng. keycloak-config-cli đăng nhập bằng tài khoản này.
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?thiếu KC_BOOTSTRAP_ADMIN_PASSWORD, chạy cp .env.example .env}
+    ports:
+      # Không dùng 8080: service trên host dùng 8080 (hello: 8080 API, 8081 management).
+      - "127.0.0.1:18080:8080"
+    # Như requests = limits memory của lab (1536Mi). JVM của Keycloak lấy heap theo phần trăm limit (MaxRAMPercentage),
+    # không có limit thì tính theo RAM của VM Docker.
+    mem_limit: 1536m
+    healthcheck:
+      # Image không có curl; mẫu của docs Keycloak ("Health checks") dùng bash /dev/tcp.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+      start_interval: 2s
+
+  # Init 1/2 đọc ../gitops: áp CHÍNH file realm của lab (gitops/infra/keycloak/realm/commerce-hub.yaml) bằng cùng image
+  # và cùng các biến IMPORT_* của Job lab (gitops/infra/keycloak/keycloak-config-cli.yaml). Chạy mỗi lần `up`, rồi thoát.
+  # Chạy lại sau khi sửa realm: docker compose up keycloak-config (không cần down).
+  keycloak-config:
+    image: docker.io/adorsys/keycloak-config-cli:6.6.0-26.8.1@sha256:1fafe0823820981c5d33d0e7682a27a817f4a178ab6933387a5c2fca366f92f2
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_AVAILABILITYCHECK_ENABLED: "true"
+      KEYCLOAK_AVAILABILITYCHECK_TIMEOUT: 120s
+      # LỆCH LAB: đăng nhập bằng admin bootstrap qua password grant của client admin-cli (mặc định của công cụ).
+      # admin-cli có sẵn scope kc-admin-api và admin có manage-realm trên master, nên công cụ tự đọc được phiên bản
+      # (không cần KEYCLOAK_SKIPSERVERINFO). Lab dùng client service account riêng vì không để mật khẩu admin trong cụm.
+      KEYCLOAK_LOGINREALM: master
+      KEYCLOAK_USER: admin
+      KEYCLOAK_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?thiếu KC_BOOTSTRAP_ADMIN_PASSWORD, chạy cp .env.example .env}
+      IMPORT_FILES_LOCATIONS: file:/config/*
+      # Bốn biến dưới giống Job lab (lý do ghi ở file đó).
+      IMPORT_CACHE_ENABLED: "false"
+      IMPORT_REMOTESTATE_ENABLED: "true"
+      IMPORT_VARSUBSTITUTION_ENABLED: "true"
+      IMPORT_VALIDATE: "true"
+      # Thay vào $(env:SMOKE_TEST_CLIENT_SECRET) của file realm. Thiếu thì công cụ dừng (undefined-is-error).
+      SMOKE_TEST_CLIENT_SECRET: ${SMOKE_TEST_CLIENT_SECRET:?thiếu SMOKE_TEST_CLIENT_SECRET, chạy cp .env.example .env}
+      # Không ghi đè smtpServer (10.20.0.5:1025, Mailpit trên gw): G0 không gửi email, trên Mac đó chỉ là cấu hình không
+      # dùng tới. Cần kiểm email thì thêm service Mailpit và đổi host trong realm thành $(env:...) (ticket 32).
+    volumes:
+      - ${GITOPS_DIR:?thiếu GITOPS_DIR, chạy cp .env.example .env}/infra/keycloak/realm:/config:ro
+
+  # Kafka 4.3.2 KRaft 1 node (broker + controller), cùng bản broker dự kiến của lab (kafka.md; Strimzi hoãn tới G1, ticket 15).
+  # Cấu hình theo docs image apache/kafka: có biến KAFKA_* nào thì file mặc định của image bị bỏ, nên khai đủ ở đây.
+  kafka:
+    image: apache/kafka:4.3.2@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7
+    environment:
+      # Cố định để volume kafka-data luôn khớp cluster ID (sinh bằng kafka-storage.sh random-uuid).
+      CLUSTER_ID: SWazDspSSfKr_YO2u-IBlA
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Hai listener client: HOST cho service trên Mac (localhost:19092), DOCKER cho container trong compose (kafka:9092).
+      # LỆCH LAB: PLAINTEXT, không xác thực. Lab bắt xác thực ở listener nội bộ (kafka.md mục "Bảo mật").
+      KAFKA_LISTENERS: HOST://:19092,DOCKER://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:19092,DOCKER://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: HOST:PLAINTEXT,DOCKER:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: DOCKER
+      # Topic chỉ tạo từ CR KafkaTopic của gitops (kafka-topics bên dưới), như lab (kafka.md). Mặc định Kafka là true.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # LỆCH LAB: 1 broker nên mọi replication factor là 1 (lab: 3, min.insync.replicas 2).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: "1"
+      # Consumer group đầu tiên không phải chờ 3 s mặc định mỗi lần khởi động service.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Mặc định của kafka-server-start là 1 GiB. Dev không có tải; lab dùng heap 512m mỗi broker.
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx256m
+    ports:
+      - "127.0.0.1:19092:19092"
+    volumes:
+      # Thư mục có sẵn trong image, thuộc appuser: volume mới chép quyền đó, Kafka ghi được.
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # Chạy một JVM mỗi lần, nên interval dài; start_interval ngắn để kafka-topics không chờ lâu lúc khởi động.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 60s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+
+  # Init 2/2 đọc ../gitops, bước 1: yq tìm mọi CR KafkaTopic trong gitops, ghi kế hoạch ra volume kafka-topics-plan.
+  # Hai container vì image Kafka không có yq và image yq không có kafka-topics.sh.
+  kafka-topics-plan:
+    image: mikefarah/yq:4.54.3@sha256:7834187596ad56fd5a81436114e0b0b9dd54c91bb43946d1f7145b2be5f9c3d2
+    # Root để ghi vào volume mới (thư mục /plan do Docker tạo, thuộc root). Container chỉ đọc gitops (mount :ro).
+    user: "0"
+    entrypoint: ["/bin/sh", "/scripts/plan-topics.sh"]
+    volumes:
+      - ${GITOPS_DIR:?thiếu GITOPS_DIR, chạy cp .env.example .env}:/gitops:ro
+      - ./kafka:/scripts:ro
+      - kafka-topics-plan:/plan
+
+  # Bước 2: tạo từng topic theo kế hoạch (--if-not-exists). G0 chưa có KafkaTopic nào nên container thoát ngay.
+  kafka-topics:
+    image: apache/kafka:4.3.2@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7
+    depends_on:
+      kafka-topics-plan:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    volumes:
+      - ./kafka:/scripts:ro
+      - kafka-topics-plan:/plan:ro
+
+  # Profile obs: Grafana, Tempo, Loki, Prometheus và OTel Collector trong một container, dữ liệu mất khi xóa container.
+  # Service bật export bằng Spring profile obs (hello: --spring.profiles.active=local,obs), gửi OTLP HTTP tới localhost:4318.
+  # Grafana: http://localhost:3000 (đăng nhập ẩn danh với quyền admin, mặc định của image).
+  lgtm:
+    image: grafana/otel-lgtm:0.41.2@sha256:79dbbe04d810bfe93fd0310610a1643ba4ed420e7432143a810e71e9cba2541e
+    profiles: [obs]
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+
+volumes:
+  pgdata:
+  kafka-data:
+  kafka-topics-plan:

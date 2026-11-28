@@ -1,0 +1,49 @@
+# So major.minor image hạ tầng giữa compose/compose.yaml (vòng dev trên Mac) và repo gitops (lab). Đỏ khi lệch.
+# G0-32, story 76 của spec G0. Logic ở scripts/compose-image-drift.sh, chạy được trên máy:
+#   scripts/compose-image-drift.sh compose/compose.yaml ../gitops
+# Chỉ kiểm, không phải phụ thuộc lúc build, nên không trái ADR-0001 (spec G0, mục "Nguồn tag image").
+name: compose-image-drift
+
+on:
+  # Lab đổi version qua commit vào gitops, repo khác: lịch là cách duy nhất để thấy lệch mà không cần PR ở platform.
+  # GitHub tự tắt workflow theo lịch của repo public sau 60 ngày không có hoạt động trong repo (docs "Disabling and
+  # enabling a workflow"); khi đó Actions báo và phải bật lại tay.
+  schedule:
+    - cron: "23 1 * * *"
+  pull_request:
+    paths:
+      - compose/compose.yaml
+      - scripts/compose-image-drift.sh
+      - .github/workflows/compose-image-drift.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Như chart.yml (ci-cd.md): PR hủy lần chạy cũ của cùng ref; schedule và chạy tay mỗi lần một nhóm.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  drift:
+    name: drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # gitops là repo public: đọc không cần token. Nhánh mặc định là cái lab đang chạy (Argo CD theo main).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hoangduoc0603/commerce-hub-gitops
+          path: gitops
+          persist-credentials: false
+
+      # yq v4 (mikefarah) có sẵn trên image runner ubuntu-24.04. Script chỉ dùng biểu thức cơ bản của v4.
+      - name: So major.minor
+        run: |
+          yq --version
+          scripts/compose-image-drift.sh compose/compose.yaml gitops
