@@ -106,6 +106,22 @@ trust:
   # Tắt thì JVM chỉ tin cacerts của JDK: gọi https://*.lab.internal lỗi PKIX.
   enabled: true
 
+# serviceMonitor: ServiceMonitor cho Prometheus Operator scrape cổng ports.management (G0-30, observability.md "Metric").
+# Prometheus của lab chọn mọi ServiceMonitor ở mọi namespace, không cần nhãn release (G0-13).
+serviceMonitor:
+  # serviceMonitor.enabled sinh ServiceMonitor. Cần ports.management và app expose endpoint prometheus trên cổng đó.
+  enabled: false
+  # serviceMonitor.path là đường dẫn metric trên cổng management. Spring Boot: /actuator/prometheus.
+  path: /actuator/prometheus
+  # serviceMonitor.interval là chu kỳ scrape, ví dụ "15s". Rỗng thì theo Prometheus (30 s ở lab).
+  interval: ""
+
+# otel: danh tính OpenTelemetry chart đặt cho pod qua biến OTEL_RESOURCE_ATTRIBUTES (G0-30).
+otel:
+  # otel.resourceAttributes thêm cặp khóa → giá trị chuỗi, ví dụ deployment.environment.name: "lab".
+  # service.version chart tự lấy từ image.tag, không đặt ở đây. Không chứa "," hay "=".
+  resourceAttributes: {}
+
 # env là cấu hình không bí mật: chart render thành ConfigMap, pod nạp bằng envFrom (ticket 21 Q1).
 # Khóa là tên biến môi trường, viết HOA_GẠCH_DƯỚI để Spring Boot map sang property (SPRING_PROFILES_ACTIVE).
 # Giá trị phải là chuỗi có nháy kép. Chart từ chối số và boolean: YAML đổi 1000000 thành 1e+06, on thành true.

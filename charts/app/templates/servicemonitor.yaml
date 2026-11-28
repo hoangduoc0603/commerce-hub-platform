@@ -1,0 +1,30 @@
+{{- /*
+ServiceMonitor (G0-30): Prometheus Operator biến thành scrape config, gọi GET <path> trên cổng management của
+mọi pod sau Service này. Prometheus thêm nhãn namespace, service, pod, container, endpoint, job (= tên Service).
+Không khai namespaceSelector: chỉ scrape Service cùng namespace. Prometheus của lab vẫn cho phép ServiceMonitor
+trỏ namespace khác (rủi ro ghi ở ticket G0-30, xử lý ở G7).
+*/ -}}
+{{- if .Values.serviceMonitor.enabled }}
+{{- if not .Values.ports.management }}
+{{- fail "serviceMonitor.enabled cần ports.management: Prometheus scrape theo tên cổng management của Service" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "app.fullname" . }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  # Chọn đúng Service của release (nhãn selector có trên metadata của Service). Pod migrate không có Service nên
+  # không bị scrape.
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  endpoints:
+    # Theo TÊN cổng của Service, không theo số: đổi số cổng không phải sửa ServiceMonitor.
+    - port: management
+      path: {{ .Values.serviceMonitor.path }}
+      {{- with .Values.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+{{- end }}

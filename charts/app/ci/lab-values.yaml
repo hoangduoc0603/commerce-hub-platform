@@ -1,5 +1,5 @@
 # Biến thể giống values lab của hello trong gitops: 1 replica, 512Mi, heap 60%, có env, secretRevision, HTTPRoute,
-# SealedSecret (thường và hook PreSync), secretEnv và Job migrate.
+# SealedSecret (thường và hook PreSync), secretEnv, Job migrate, ServiceMonitor và resource attributes OTel.
 replicaCount: 1
 image:
   repository: ghcr.io/hoangduoc0603/commerce-hub-hello
@@ -16,6 +16,11 @@ env:
   SPRING_PROFILES_ACTIVE: "lab"
   LOGGING_LEVEL_ROOT: "INFO"
 secretRevision: 1
+serviceMonitor:
+  enabled: true
+otel:
+  resourceAttributes:
+    deployment.environment.name: "lab"
 httpRoute:
   enabled: true
   hostnames:

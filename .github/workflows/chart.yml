@@ -39,7 +39,8 @@ env:
   KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
   KUBERNETES_VERSION: 1.37.0
   CHART_DIR: charts/app
-  # Schema của kind từ CRD (HTTPRoute của Gateway API v1.6.1, SealedSecret của Sealed Secrets 0.41.2) sinh sẵn trong
+  # Schema của kind từ CRD (HTTPRoute của Gateway API v1.6.1, SealedSecret của Sealed Secrets 0.41.2, ServiceMonitor của
+  # Prometheus Operator 0.95.2) sinh sẵn trong
   # repo; nguồn và cách sinh lại ở kubeconform-schemas/README.md. Không dùng -ignore-missing-schemas (helm-chart.md
   # "Kiểm tra", G0-22).
   CRD_SCHEMA_LOCATION: kubeconform-schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
@@ -114,6 +115,16 @@ jobs:
             echo "::error::Chart mặc định không được sinh Job migrate (migration.enabled mặc định false)."
             exit 1
           fi
+          # ServiceMonitor cần CRD của Prometheus Operator: mặc định không sinh, để cụm chưa có operator vẫn cài được (G0-30).
+          if grep -q '^kind: ServiceMonitor$' <<<"$default"; then
+            echo "::error::Chart mặc định không được sinh ServiceMonitor (serviceMonitor.enabled mặc định false)."
+            exit 1
+          fi
+          # service.version do chart lấy từ image.tag; cho values đặt đè thì trace mang version sai (G0-30).
+          if helm template ci "$CHART_DIR" -f "${CHART_DIR}/ci/lab-values.yaml" --set-string 'otel.resourceAttributes.service\.version=x' >/dev/null 2>&1; then
+            echo "::error::helm template phải từ chối otel.resourceAttributes.service.version."
+            exit 1
+          fi
           job="$(helm template ci "$CHART_DIR" -n ci -f "${CHART_DIR}/ci/lab-values.yaml" -s templates/migration-job.yaml)"
           svc="$(helm template ci "$CHART_DIR" -n ci -f "${CHART_DIR}/ci/lab-values.yaml" -s templates/service.yaml)"
           # Pod migrate không có readinessProbe nên Ready ngay: nhãn của nó không được khớp selector của Service.
@@ -130,7 +141,7 @@ jobs:
               exit 1
             fi
           done
-          echo "Đúng: không Job khi tắt, nhãn tách khỏi Service, không TTL, SA default, chặn preSync chuỗi và secretEnv trùng biến chart."
+          echo "Đúng: không Job, ServiceMonitor khi tắt, chặn đè service.version, nhãn tách khỏi Service, không TTL, SA default, chặn preSync chuỗi và secretEnv trùng biến chart."
 
   publish:
     name: publish

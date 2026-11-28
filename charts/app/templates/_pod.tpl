@@ -33,8 +33,8 @@ capabilities:
 {{- end }}
 
 {{/*
-app.runtimeEnv: phần tử env do chart đặt (JAVA_TOOL_OPTIONS hoặc NODE_EXTRA_CA_CERTS). Rỗng nếu không có gì.
-Workload không chạy JVM trong dự án là Node (seller-web): trust đi qua NODE_EXTRA_CA_CERTS.
+app.runtimeEnv: phần tử env do chart đặt (JAVA_TOOL_OPTIONS hoặc NODE_EXTRA_CA_CERTS, OTEL_RESOURCE_ATTRIBUTES).
+Rỗng nếu không có gì. Workload không chạy JVM trong dự án là Node (seller-web): trust đi qua NODE_EXTRA_CA_CERTS.
 */}}
 {{- define "app.runtimeEnv" -}}
 {{- if .Values.jvm.enabled }}
@@ -45,6 +45,38 @@ Workload không chạy JVM trong dự án là Node (seller-web): trust đi qua N
 - name: NODE_EXTRA_CA_CERTS
   value: {{ include "app.trustDir" . }}/lab-root-ca.pem
 {{- end }}
+{{- with (include "app.otelResourceAttributes" . | trim) }}
+- name: OTEL_RESOURCE_ATTRIBUTES
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
+app.otelResourceAttributes: giá trị OTEL_RESOURCE_ATTRIBUTES (G0-30), dạng k1=v1,k2=v2 theo đặc tả biến môi trường
+của OpenTelemetry: SDK Java (Spring Boot đọc trong OpenTelemetryResourceAttributes) lẫn Node đều đọc, nên chart không
+phải biết runtime. service.version = image.tag (git SHA): thiếu nó thì Collector (k8sattributes) tự suy từ image,
+mà image ghim digest nên ra sha256 thay vì SHA commit. Boot: property management.opentelemetry.resource-attributes
+cùng khóa thắng biến này, nên service đừng đặt service.version trong application.yaml.
+Từ chối giá trị có "," hoặc "=": đặc tả dùng hai ký tự này làm dấu phân cách, chart không percent-encode.
+*/}}
+{{- define "app.otelResourceAttributes" -}}
+{{- $pairs := list }}
+{{- with .Values.image.tag }}
+{{- $pairs = append $pairs (printf "service.version=%s" .) }}
+{{- end }}
+{{- range $key, $value := .Values.otel.resourceAttributes }}
+{{- if eq $key "service.version" }}
+{{- fail "otel.resourceAttributes.service.version: chart tự đặt từ image.tag" }}
+{{- end }}
+{{- if not (kindIs "string" $value) }}
+{{- fail (printf "otel.resourceAttributes.%s phải là chuỗi có nháy kép" $key) }}
+{{- end }}
+{{- if or (contains "," $key) (contains "=" $key) (contains "," $value) (contains "=" $value) }}
+{{- fail (printf "otel.resourceAttributes.%s: khóa và giá trị không được chứa \",\" hoặc \"=\"" $key) }}
+{{- end }}
+{{- $pairs = append $pairs (printf "%s=%s" $key $value) }}
+{{- end }}
+{{- join "," $pairs }}
 {{- end }}
 
 {{/*
@@ -58,7 +90,7 @@ pod kẹt CreateContainerConfigError: lỗi lộ ngay, không âm thầm rỗng.
 {{- $path := .path }}
 {{- range $envName, $ref := .map }}
 {{- /* Trùng tên thì Kubernetes lấy phần tử sau, ghi đè cờ JVM và truststore của chart (review G0-27). */}}
-{{- if has $envName (list "JAVA_TOOL_OPTIONS" "NODE_EXTRA_CA_CERTS") }}
+{{- if has $envName (list "JAVA_TOOL_OPTIONS" "NODE_EXTRA_CA_CERTS" "OTEL_RESOURCE_ATTRIBUTES") }}
 {{- fail (printf "%s.%s: biến này do chart đặt, không lấy từ Secret được" $path $envName) }}
 {{- end }}
 - name: {{ $envName }}
